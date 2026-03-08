@@ -115,3 +115,4 @@ recetas-ocr-api/src/RecetasOCR.Domain/obj/project.assets.json
 recetas-ocr-api/src/RecetasOCR.Domain/obj/RecetasOCR.Domain.csproj.nuget.dgspec.json
 recetas-ocr-api/src/RecetasOCR.Domain/obj/Debug/net9.0/RecetasOCR.Domain.AssemblyInfo.cs
 recetas-ocr-api/src/RecetasOCR.Application/obj/Debug/net9.0/RecetasOCR.Application.assets.cache
+recetas-ocr-api/src/RecetasOCR.API/obj/project.assets.json
