@@ -1,0 +1,31 @@
+{
+  "folders": [
+    { "name": "🗄️  DB  — recetas-ocr-db",  "path": "./recetas-ocr-db"  },
+    { "name": "⚙️  API — recetas-ocr-api", "path": "./recetas-ocr-api" },
+    { "name": "🌐 Web — recetas-ocr-web",  "path": "./recetas-ocr-web"  }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "files.encoding": "utf8",
+    "files.eol": "\n",
+    "github.copilot.chat.codeGeneration.instructions": [
+      { "file": ".github/copilot-instructions.md" }
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "GitHub.copilot",
+      "GitHub.copilot-chat",
+      "ms-dotnettools.csharp",
+      "ms-dotnettools.csdevkit",
+      "bradlc.vscode-tailwindcss",
+      "dbaeumer.vscode-eslint",
+      "esbenp.prettier-vscode",
+      "ms-mssql.mssql",
+      "mtxr.sqltools",
+      "formulahendry.dotnet-test-explorer",
+      "ms-azuretools.vscode-azurestorage"
+    ]
+  }
+}
