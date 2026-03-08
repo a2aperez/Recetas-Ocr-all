@@ -1,0 +1,39 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln.docstates
+
+# Test results
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+project.lock.json
+project.fragment.lock.json
+
+# Publish output
+publish/
+artifacts/
+
+# Rider
+.idea/
+*.sln.iml
+
+# Logs
+*.log
+logs/
+
+# Secrets / environment-specific (no subir al repo)
+appsettings.Development.json
+appsettings.Local.json
