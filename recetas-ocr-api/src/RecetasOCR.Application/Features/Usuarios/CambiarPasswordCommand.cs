@@ -39,13 +39,19 @@ public class CambiarPasswordCommandValidator : AbstractValidator<CambiarPassword
 
 public class CambiarPasswordCommandHandler(
     IRecetasOcrDbContext   db,
-    IPasswordHasherService passwordHasher)
+    IPasswordHasherService passwordHasher,
+    ICurrentUserService    currentUser)
     : IRequestHandler<CambiarPasswordCommand, bool>
 {
     public async Task<bool> Handle(
         CambiarPasswordCommand command,
         CancellationToken      ct)
     {
+        // Solo el propio usuario puede cambiar su contraseña
+        if (currentUser.UserId != command.IdUsuario)
+            throw new UnauthorizedAccessException(
+                "Solo puedes cambiar tu propia contraseña.");
+
         var hashRow = await db.Database
             .SqlQuery<PasswordRow>($"""
                 SELECT PasswordHash FROM seg.Usuarios WHERE Id = {command.IdUsuario}

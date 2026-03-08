@@ -3,6 +3,7 @@
         "ForEach-Object": true,
         "Set-Content": true,
         "dotnet build": true,
-        "npm install": true
+        "npm install": true,
+        "git add": true
     }
 }

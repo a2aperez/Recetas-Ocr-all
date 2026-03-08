@@ -11,7 +11,7 @@ namespace RecetasOCR.API.Controllers;
 
 [ApiController]
 [Route("api/usuarios")]
-//[Authorize]
+[Authorize]
 public class UsuariosController(IMediator mediator, ICurrentUserService currentUser) : ControllerBase
 {
     [HttpGet]
@@ -25,6 +25,7 @@ public class UsuariosController(IMediator mediator, ICurrentUserService currentU
     }
 
     [HttpGet("perfil")]
+    [Authorize]
     public async Task<ActionResult<ApiResponse<UsuarioDetalleDto>>> GetPerfil(CancellationToken ct)
     {
         var result = await mediator.Send(new GetUsuarioByIdQuery(currentUser.UserId!.Value), ct);
