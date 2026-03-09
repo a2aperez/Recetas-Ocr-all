@@ -37,7 +37,8 @@ public static class InfrastructureServiceExtensions
         services.AddScoped<IBlobStorageService, BlobStorageService>();
 
         // ── OCR API ──────────────────────────────────────────────────────────────
-        services.AddScoped<IOcrApiService, NadroOcrApiService>();
+        // AddHttpClient gestiona el ciclo de vida del HttpClient correctamente
+        services.AddHttpClient<IOcrApiService, NadroOcrApiService>();
 
         // ── JWT ──────────────────────────────────────────────────────────────────
         services.AddSingleton<IJwtService, JwtService>();

@@ -1,9 +1,8 @@
 namespace RecetasOCR.Application.DTOs.Catalogos;
 
-public record RolDto(
+public record ModuloDto(
     int     Id,
     string  Clave,
     string  Nombre,
-    string? Descripcion,
-    bool    Activo
+    string? Descripcion
 );

@@ -1,5 +1,6 @@
 ﻿using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RecetasOCR.Application.Common.Interfaces;
 using RecetasOCR.Application.DTOs.Facturacion;
 using RecetasOCR.Application.DTOs.Paginacion;
@@ -13,7 +14,9 @@ public record GetFacturasPaginadoQuery(FiltrosFacturaDto Filtros)
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
-public class GetFacturasPaginadoQueryHandler(IRecetasOcrDbContext db)
+public class GetFacturasPaginadoQueryHandler(
+    IRecetasOcrDbContext                       db,
+    ILogger<GetFacturasPaginadoQueryHandler>   logger)
     : IRequestHandler<GetFacturasPaginadoQuery, PagedResultDto<FacturaResumenDto>>
 {
     public async Task<PagedResultDto<FacturaResumenDto>> Handle(
@@ -25,48 +28,59 @@ public class GetFacturasPaginadoQueryHandler(IRecetasOcrDbContext db)
         var pageSize = Math.Max(1, f.PageSize);
         var offset   = (page - 1) * pageSize;
 
-        var total = await db.Database
-            .SqlQuery<int>($"""
-                SELECT COUNT(*) AS Value
-                FROM   fac.CFDI c
-                INNER  JOIN rec.GruposReceta g ON g.Id = c.IdGrupo
-                WHERE  ({f.IdAseguradora} IS NULL OR g.IdAseguradora = {f.IdAseguradora})
-                  AND  ({f.FechaDesde}    IS NULL OR c.FechaTimbrado >= {f.FechaDesde})
-                  AND  ({f.FechaHasta}    IS NULL OR c.FechaTimbrado <= {f.FechaHasta})
-                  AND  ({f.RFC}           IS NULL OR c.RFCReceptor LIKE {(f.RFC != null ? "%" + f.RFC + "%" : null)})
-                  AND  ({f.Estado}        IS NULL OR c.Estado = {f.Estado})
-                """)
-            .FirstAsync(ct);
+        try
+        {
+            var total = await db.Database
+                .SqlQuery<int>($"""
+                    SELECT COUNT(*) AS Value
+                    FROM   fac.CFDI c
+                    INNER  JOIN rec.GruposReceta g ON g.Id = c.IdGrupo
+                    WHERE  ({f.IdAseguradora} IS NULL OR g.IdAseguradora = {f.IdAseguradora})
+                      AND  ({f.FechaDesde}    IS NULL OR c.FechaTimbrado >= {f.FechaDesde})
+                      AND  ({f.FechaHasta}    IS NULL OR c.FechaTimbrado <= {f.FechaHasta})
+                      AND  ({f.RFC}           IS NULL OR c.RFCReceptor LIKE {(f.RFC != null ? "%" + f.RFC + "%" : null)})
+                      AND  ({f.Estado}        IS NULL OR c.Estado = {f.Estado})
+                    """)
+                .FirstOrDefaultAsync(ct);
 
-        if (total == 0)
+            if (total == 0)
+                return PagedResultDto<FacturaResumenDto>.Empty(page, pageSize);
+
+            var rfcLike = f.RFC != null ? "%" + f.RFC + "%" : null;
+
+            var items = await db.Database
+                .SqlQuery<FacturaResumenRow>($"""
+                    SELECT c.Id, c.UUID, g.NombrePaciente, c.RFCReceptor AS RFC,
+                           c.Total, g.FechaConsulta, c.FechaTimbrado, c.Estado,
+                           a.Nombre AS NombreAseguradora
+                    FROM   fac.CFDI c
+                    INNER  JOIN rec.GruposReceta  g ON g.Id  = c.IdGrupo
+                    LEFT   JOIN cat.Aseguradoras  a ON a.Id  = g.IdAseguradora
+                    WHERE  ({f.IdAseguradora} IS NULL OR g.IdAseguradora = {f.IdAseguradora})
+                      AND  ({f.FechaDesde}    IS NULL OR c.FechaTimbrado >= {f.FechaDesde})
+                      AND  ({f.FechaHasta}    IS NULL OR c.FechaTimbrado <= {f.FechaHasta})
+                      AND  ({rfcLike}         IS NULL OR c.RFCReceptor LIKE {rfcLike})
+                      AND  ({f.Estado}        IS NULL OR c.Estado = {f.Estado})
+                    ORDER  BY c.FechaCreacion DESC
+                    OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY
+                    """)
+                .ToListAsync(ct);
+
+            return new PagedResultDto<FacturaResumenDto>(
+                items.Select(r => new FacturaResumenDto(
+                    r.Id, r.UUID, r.NombrePaciente, r.RFC, r.Total,
+                    r.FechaConsulta, r.FechaTimbrado, r.Estado, r.NombreAseguradora
+                )).ToList(),
+                total, page, pageSize);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Error al consultar facturas paginadas (Page={Page}, PageSize={PageSize}). " +
+                "Retornando resultado vacío para no bloquear el dashboard.",
+                page, pageSize);
             return PagedResultDto<FacturaResumenDto>.Empty(page, pageSize);
-
-        var rfcLike   = f.RFC != null ? "%" + f.RFC + "%" : null;
-
-        var items = await db.Database
-            .SqlQuery<FacturaResumenRow>($"""
-                SELECT c.Id, c.UUID, g.NombrePaciente, c.RFCReceptor AS RFC,
-                       c.Total, g.FechaConsulta, c.FechaTimbrado, c.Estado,
-                       a.Nombre AS NombreAseguradora
-                FROM   fac.CFDI c
-                INNER  JOIN rec.GruposReceta  g ON g.Id  = c.IdGrupo
-                INNER  JOIN cat.Aseguradoras  a ON a.Id  = g.IdAseguradora
-                WHERE  ({f.IdAseguradora} IS NULL OR g.IdAseguradora = {f.IdAseguradora})
-                  AND  ({f.FechaDesde}    IS NULL OR c.FechaTimbrado >= {f.FechaDesde})
-                  AND  ({f.FechaHasta}    IS NULL OR c.FechaTimbrado <= {f.FechaHasta})
-                  AND  ({rfcLike}         IS NULL OR c.RFCReceptor LIKE {rfcLike})
-                  AND  ({f.Estado}        IS NULL OR c.Estado = {f.Estado})
-                ORDER  BY c.FechaCreacion DESC
-                OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY
-                """)
-            .ToListAsync(ct);
-
-        return new PagedResultDto<FacturaResumenDto>(
-            items.Select(r => new FacturaResumenDto(
-                r.Id, r.UUID, r.NombrePaciente, r.RFC, r.Total,
-                r.FechaConsulta, r.FechaTimbrado, r.Estado, r.NombreAseguradora
-            )).ToList(),
-            total, page, pageSize);
+        }
     }
 
     private record FacturaResumenRow(
@@ -76,7 +90,7 @@ public class GetFacturasPaginadoQueryHandler(IRecetasOcrDbContext db)
         string    RFC,
         decimal   Total,
         DateOnly? FechaConsulta,
-        DateTime  FechaTimbrado,
+        DateTime? FechaTimbrado,
         string    Estado,
-        string    NombreAseguradora);
+        string?   NombreAseguradora);   // nullable: LEFT JOIN puede no encontrar aseguradora
 }

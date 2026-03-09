@@ -1,5 +1,6 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RecetasOCR.Application.Common.Interfaces;
 using RecetasOCR.Application.DTOs.GruposReceta;
 using RecetasOCR.Application.DTOs.Paginacion;
@@ -15,7 +16,9 @@ namespace RecetasOCR.Application.Features.GruposReceta;
 public record GetGruposRecetaQuery(FiltrosGrupoDto Filtros)
     : IRequest<PagedResultDto<GrupoRecetaDto>>;
 
-public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
+public class GetGruposRecetaQueryHandler(
+    IRecetasOcrDbContext                       db,
+    ILogger<GetGruposRecetaQueryHandler>       logger)
     : IRequestHandler<GetGruposRecetaQuery, PagedResultDto<GrupoRecetaDto>>
 {
     public async Task<PagedResultDto<GrupoRecetaDto>> Handle(
@@ -35,6 +38,8 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
         var fechaHasta    = f.FechaHasta;
         var busquedaLike  = f.Busqueda != null ? $"%{f.Busqueda}%" : null;
 
+        try
+        {
         // ── Total ──────────────────────────────────────────────────────
         var total = await db.Database
             .SqlQuery<int>($"""
@@ -50,7 +55,7 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
                         OR COALESCE(g.NombrePaciente, '') LIKE {busquedaLike}
                         OR COALESCE(g.NombreMedico, '')   LIKE {busquedaLike})
                 """)
-            .FirstAsync(cancellationToken);
+            .FirstOrDefaultAsync(cancellationToken);
 
         if (total == 0)
             return PagedResultDto<GrupoRecetaDto>.Empty(page, pageSize);
@@ -71,7 +76,7 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
                     g.ModificadoPor, g.FechaModificacion
                 FROM   rec.GruposReceta     g
                 INNER JOIN cat.EstadosGrupo  eg ON eg.Id = g.IdEstadoGrupo
-                INNER JOIN cat.Aseguradoras  a  ON a.Id  = g.IdAseguradora
+                LEFT  JOIN cat.Aseguradoras  a  ON a.Id  = g.IdAseguradora
                 WHERE  ({idAseguradora} IS NULL OR g.IdAseguradora  = {idAseguradora})
                   AND  ({estadoGrupo}   IS NULL OR eg.Clave         = {estadoGrupo})
                   AND  ({fechaDesde}    IS NULL OR g.FechaCreacion >= {fechaDesde})
@@ -86,6 +91,15 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
             .ToListAsync(cancellationToken);
 
         return new(rows.Select(MapToDto).ToList(), total, page, pageSize);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Error al consultar grupos de receta (Page={Page}, PageSize={PageSize}). " +
+                "Retornando resultado vacío para no bloquear el dashboard.",
+                page, pageSize);
+            return PagedResultDto<GrupoRecetaDto>.Empty(page, pageSize);
+        }
     }
 
     // ── Helpers compartidos con GetGrupoRecetaDetalleQuery ─────────────
@@ -94,7 +108,7 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
         Id:                     r.Id,
         FolioBase:              r.FolioBase,
         IdCliente:              r.IdCliente,
-        IdAseguradora:          r.IdAseguradora,
+        IdAseguradora:          r.IdAseguradora ?? 0,
         NombreAseguradora:      r.NombreAseguradora,
         Nur:                    r.Nur,
         NombrePaciente:         r.NombrePaciente,
@@ -121,7 +135,7 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
         Guid      Id,
         string?   FolioBase,
         Guid?     IdCliente,
-        int       IdAseguradora,
+        int?      IdAseguradora,      // nullable: rec.GruposReceta.IdAseguradora puede ser null
         string?   NombreAseguradora,
         string?   Nur,
         string?   NombrePaciente,

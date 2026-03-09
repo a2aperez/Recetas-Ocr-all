@@ -56,6 +56,18 @@ public class ExceptionHandlerMiddleware(
             "[{Status}] {ExType} — Path: {Path} | User: {Username} | {Message}",
             status, ex.GetType().Name, path, username, ex.Message);
 
+        // Log explícito de InnerExceptions para facilitar diagnóstico en desarrollo
+        var inner = ex.InnerException;
+        var depth = 1;
+        while (inner != null)
+        {
+            logger.LogError(
+                "  [{Depth}] InnerException {InnerType}: {InnerMessage}\n{StackTrace}",
+                depth, inner.GetType().Name, inner.Message, inner.StackTrace);
+            inner = inner.InnerException;
+            depth++;
+        }
+
         var response = ApiResponse<object>.Fail(errors);
 
         // Include detail only in development
@@ -64,11 +76,31 @@ public class ExceptionHandlerMiddleware(
             {
                 Success = false,
                 Errors  = errors,
-                Message = $"{ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"
+                Message = BuildDevMessage(ex)
             };
 
         context.Response.StatusCode  = status;
         context.Response.ContentType = "application/json";
         await context.Response.WriteAsync(JsonSerializer.Serialize(response, JsonOpts));
+    }
+
+    private static string BuildDevMessage(Exception ex)
+    {
+        var sb      = new System.Text.StringBuilder();
+        var current = ex;
+        var depth   = 0;
+        while (current != null)
+        {
+            var prefix = depth == 0 ? "" : new string(' ', depth * 2) + "↳ ";
+            sb.AppendLine($"{prefix}{current.GetType().Name}: {current.Message}");
+            if (current.StackTrace is not null)
+            {
+                foreach (var line in current.StackTrace.Split('\n'))
+                    sb.AppendLine($"{prefix}  {line.TrimEnd()}");
+            }
+            current = current.InnerException;
+            depth++;
+        }
+        return sb.ToString();
     }
 }

@@ -7,9 +7,10 @@ using RecetasOCR.Application.DTOs.Paginacion;
 namespace RecetasOCR.Application.Features.Catalogos;
 
 public record GetMedicamentosCatalogoQuery(
-    string? Busqueda = null,
-    int     Page     = 1,
-    int     PageSize = 20
+    string? Busqueda         = null,
+    int     Page             = 1,
+    int     PageSize         = 20,
+    bool    IncluyeInactivos = false   // true para pantalla de administración
 ) : IRequest<PagedResultDto<MedicamentoCatalogoDto>>;
 
 public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
@@ -28,21 +29,22 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
             .SqlQuery<int>($"""
                 SELECT COUNT(*) AS Value
                 FROM   cat.Medicamentos
-                WHERE  Activo = 1
+                WHERE  ({query.IncluyeInactivos} = 1 OR Activo = 1)
                   AND  ({busquedaLike} IS NULL
                         OR NombreComercial LIKE {busquedaLike}
                         OR SustanciaActiva LIKE {busquedaLike})
                 """)
-            .FirstAsync(ct);
+            .FirstOrDefaultAsync(ct);
 
         if (total == 0)
             return PagedResultDto<MedicamentoCatalogoDto>.Empty(page, pageSize);
 
         var rows = await db.Database
             .SqlQuery<MedicamentoRow>($"""
-                SELECT Id, NombreComercial, SustanciaActiva, Presentacion, Concentracion
+                SELECT Id, NombreComercial, SustanciaActiva, Presentacion,
+                       Concentracion, ClaveSAT, Activo
                 FROM   cat.Medicamentos
-                WHERE  Activo = 1
+                WHERE  ({query.IncluyeInactivos} = 1 OR Activo = 1)
                   AND  ({busquedaLike} IS NULL
                         OR NombreComercial LIKE {busquedaLike}
                         OR SustanciaActiva LIKE {busquedaLike})
@@ -53,7 +55,8 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
 
         var items = rows
             .Select(r => new MedicamentoCatalogoDto(
-                r.Id, r.NombreComercial, r.SustanciaActiva, r.Presentacion, r.Concentracion))
+                r.Id, r.NombreComercial, r.SustanciaActiva, r.Presentacion,
+                r.Concentracion, r.ClaveSAT, r.Activo))
             .ToList();
 
         return new PagedResultDto<MedicamentoCatalogoDto>(items, total, page, pageSize);
@@ -64,5 +67,7 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
         string  NombreComercial,
         string? SustanciaActiva,
         string? Presentacion,
-        string? Concentracion);
+        string? Concentracion,
+        string? ClaveSAT,
+        bool    Activo);
 }

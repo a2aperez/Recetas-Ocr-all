@@ -1,25 +1,25 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Upload, Camera, Images, X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, Upload, Camera, Images, X, CheckCircle, AlertCircle } from 'lucide-react'
 import { gruposRecetaApi } from '@/api/grupos-receta.api'
+import { imagenesApi } from '@/api/imagenes.api'
 import { CamaraCaptura } from '@/components/imagenes/CamaraCaptura'
 import { GaleriaImport } from '@/components/imagenes/GaleriaImport'
-import { useSubirImagen } from '@/hooks/useImagenes'
 import { PageHeader } from '@/components/common/PageHeader'
-import type { OrigenImagen } from '@/types/imagen.types'
+import toast from 'react-hot-toast'
+import type { ImagenConOcrDto } from '@/types/imagen.types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type FileOrigen = OrigenImagen
-
-interface PendingFile {
-  id: string
+interface ArchivoEnCola {
+  uid: string
   file: File
-  origen: FileOrigen
-  progress: number
-  status: 'pendiente' | 'subiendo' | 'ok' | 'error'
-  errorMsg?: string
+  origen: 'CAMARA' | 'GALERIA'
+  estado: 'pendiente' | 'subiendo' | 'ocr' | 'completado' | 'error'
+  progreso: number
+  error?: string
+  resultado?: ImagenConOcrDto
   preview: string | null
 }
 
@@ -66,7 +66,7 @@ function GrupoSelector({ onSelect }: { onSelect: (id: string) => void }) {
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         {isLoading ? (
           <div className="p-10 flex flex-col items-center gap-2 text-gray-400">
-            <Loader2 className="w-7 h-7 animate-spin text-blue-500" />
+            <div className="w-7 h-7 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-sm">Cargando grupos...</span>
           </div>
         ) : isError ? (
@@ -113,134 +113,188 @@ function GrupoSelector({ onSelect }: { onSelect: (id: string) => void }) {
   )
 }
 
+// ─── OCR Loading Overlay ──────────────────────────────────────────────────────
+
+function OcrOverlay({ progreso }: { progreso: number }) {
+  const label =
+    progreso < 20 ? 'Subiendo imagen...' :
+    progreso < 90 ? 'Extrayendo datos de la receta...' :
+    'Guardando resultados...'
+
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+      <div className="bg-white rounded-xl p-8 max-w-sm w-full mx-4 text-center shadow-2xl">
+        <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Procesando OCR...</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          Analizando la receta médica con inteligencia artificial.
+          Esto puede tomar entre 10 y 30 segundos.
+        </p>
+        <div className="w-full bg-gray-200 rounded-full h-2">
+          <div
+            className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+            style={{ width: `${progreso}%` }}
+          />
+        </div>
+        <p className="text-xs text-gray-400 mt-2">{label}</p>
+      </div>
+    </div>
+  )
+}
+
 // ─── PAGE ────────────────────────────────────────────────────────────────────
 
 export default function SubirImagenPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
-  const { mutateAsync: subirImagen } = useSubirImagen()
+  const qc = useQueryClient()
 
   const [idGrupoOverride, setIdGrupoOverride] = useState<string | null>(null)
   const idGrupo = searchParams.get('idGrupo') ?? idGrupoOverride
 
   const [activeTab, setActiveTab] = useState<TabId>('galeria')
-  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
-  const [uploading, setUploading] = useState(false)
+  const [archivos, setArchivos] = useState<ArchivoEnCola[]>([])
+  const [subiendo, setSubiendo] = useState(false)
+  const [progreso, setProgreso] = useState(0)
 
-  // ── Event handlers ────────────────────────────────────────────────────────
+  // Interval ref for simulated OCR progress
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  function addFiles(files: File[], origen: FileOrigen) {
-    const newEntries: PendingFile[] = files.map(f => ({
-      id: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
-      file: f,
-      origen,
-      progress: 0,
-      status: 'pendiente',
-      preview: makePreview(f),
-    }))
-    setPendingFiles(prev => {
-      // Dedupe by name+size
-      const existingKeys = new Set(prev.map(p => `${p.file.name}-${p.file.size}`))
-      return [...prev, ...newEntries.filter(e => !existingKeys.has(`${e.file.name}-${e.file.size}`))]
-    })
+  // Simulate progress from 20% up to 88% during OCR wait
+  useEffect(() => {
+    if (subiendo) {
+      intervalRef.current = setInterval(() => {
+        setProgreso(prev => prev < 88 ? Math.min(prev + 5, 88) : prev)
+      }, 800)
+    } else {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
+    }
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current)
+    }
+  }, [subiendo])
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  function setArchivoEstado(
+    uid: string,
+    estado: ArchivoEnCola['estado'],
+    prog = 0,
+    resultado?: ImagenConOcrDto,
+    error?: string
+  ) {
+    setArchivos(prev =>
+      prev.map(a => a.uid === uid ? { ...a, estado, progreso: prog, resultado, error } : a)
+    )
   }
 
-  const onCaptura = useCallback(
-    (file: File) => {
-      addFiles([file], 'CAMARA')
-      setActiveTab('galeria') // switch to list view after capture
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  )
+  const addFiles = useCallback((files: File[], origen: 'CAMARA' | 'GALERIA') => {
+    setArchivos(prev => {
+      const existingKeys = new Set(prev.map(a => `${a.file.name}-${a.file.size}`))
+      const nuevos: ArchivoEnCola[] = files
+        .filter(f => !existingKeys.has(`${f.name}-${f.size}`))
+        .map(f => ({
+          uid: crypto.randomUUID(),
+          file: f,
+          origen,
+          estado: 'pendiente',
+          progreso: 0,
+          preview: makePreview(f),
+        }))
+      return [...prev, ...nuevos]
+    })
+  }, [])
+
+  const onCaptura = useCallback((file: File) => {
+    addFiles([file], 'CAMARA')
+    setActiveTab('galeria')
+  }, [addFiles])
 
   const onArchivosGaleria = useCallback((files: File[]) => {
-    // GaleriaImport manages its own internal list; we only get what's valid
-    setPendingFiles(prev => {
-      const existingKeys = new Set(
-        prev.filter(p => p.origen === 'GALERIA').map(p => `${p.file.name}-${p.file.size}`)
+    setArchivos(prev => {
+      const cameraItems = prev.filter(a => a.origen === 'CAMARA')
+      const existingGaleria = new Set(
+        prev.filter(a => a.origen === 'GALERIA').map(a => `${a.file.name}-${a.file.size}`)
       )
-      const fresh = files
-        .filter(f => !existingKeys.has(`${f.name}-${f.size}`))
-        .map(
-          (f): PendingFile => ({
-            id: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
-            file: f,
-            origen: 'GALERIA',
-            progress: 0,
-            status: 'pendiente',
-            preview: makePreview(f),
-          })
-        )
-      // merge: keep camara items + rebuild galeria items from fresh list
-      const cameraItems = prev.filter(p => p.origen === 'CAMARA')
-      const galeriaItems: PendingFile[] = files.map(f => {
+      const galeriaItems: ArchivoEnCola[] = files.map(f => {
         const existing = prev.find(
-          p => p.origen === 'GALERIA' && p.file.name === f.name && p.file.size === f.size
+          a => a.origen === 'GALERIA' && a.file.name === f.name && a.file.size === f.size
         )
-        return (
-          existing ?? {
-            id: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
-            file: f,
-            origen: 'GALERIA',
-            progress: 0,
-            status: 'pendiente',
-            preview: makePreview(f),
-          }
-        )
+        return existing ?? {
+          uid: crypto.randomUUID(),
+          file: f,
+          origen: 'GALERIA',
+          estado: 'pendiente',
+          progreso: 0,
+          preview: makePreview(f),
+        }
       })
-      void fresh // suppress lint
+      void existingGaleria
       return [...cameraItems, ...galeriaItems]
     })
   }, [])
 
-  function removeFile(id: string) {
-    setPendingFiles(prev => prev.filter(p => p.id !== id))
-  }
+  // ── Upload ────────────────────────────────────────────────────────────────
 
-  // ── Upload all ────────────────────────────────────────────────────────────
-
-  async function subirTodo() {
+  async function handleSubirTodo() {
     if (!idGrupo) return
-    setUploading(true)
+    const pendientes = archivos.filter(a => a.estado === 'pendiente')
+    if (pendientes.length === 0) return
 
-    const toUpload = pendingFiles.filter(p => p.status === 'pendiente')
+    setSubiendo(true)
+    setProgreso(0)
 
-    for (const entry of toUpload) {
-      setPendingFiles(prev =>
-        prev.map(p => (p.id === entry.id ? { ...p, status: 'subiendo', progress: 0 } : p))
-      )
+    // Process one at a time; navigate immediately after the first
+    for (const archivo of pendientes) {
+      setArchivoEstado(archivo.uid, 'subiendo', 0)
+
       try {
-        await subirImagen({
+        const resultado = await imagenesApi.subir(
           idGrupo,
-          archivo: entry.file,
-          origen: entry.origen,
-          onProgress: (pct) =>
-            setPendingFiles(prev =>
-              prev.map(p => (p.id === entry.id ? { ...p, progress: pct } : p))
-            ),
-        })
-        setPendingFiles(prev =>
-          prev.map(p => (p.id === entry.id ? { ...p, status: 'ok', progress: 100 } : p))
+          archivo.file,
+          archivo.origen,
+          (pct) => setProgreso(pct) // 0-20 from upload progress
         )
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Error desconocido'
-        setPendingFiles(prev =>
-          prev.map(p =>
-            p.id === entry.id ? { ...p, status: 'error', errorMsg: msg } : p
-          )
-        )
+
+        setProgreso(100)
+        setArchivoEstado(archivo.uid, 'completado', 100, resultado)
+
+        // Invalidate caches
+        qc.invalidateQueries({ queryKey: ['imagenes', 'by-grupo', idGrupo] })
+        qc.invalidateQueries({ queryKey: ['grupos-receta', 'detail', idGrupo] })
+
+        setSubiendo(false)
+
+        if (resultado.datosOcr !== null) {
+          const confianza = resultado.datosOcr.confianzaPromedio
+          if (resultado.estadoImagen === 'ILEGIBLE') {
+            toast.error('Imagen ilegible — completa los datos manualmente')
+            navigate(`/revision/${resultado.id}?fromUpload=true&manual=true`)
+          } else if (resultado.datosOcr.esConfianzaBaja) {
+            toast(`OCR completado con confianza ${confianza.toFixed(0)}% — revisa los datos`, { icon: '⚠️' })
+            navigate(`/revision/${resultado.id}?fromUpload=true`)
+          } else {
+            toast.success(`✓ OCR exitoso (${confianza.toFixed(0)}% confianza) — confirma los datos`)
+            navigate(`/revision/${resultado.id}?fromUpload=true`)
+          }
+        } else {
+          toast('Imagen subida. El OCR se procesará en breve.', { icon: '⚠️' })
+          navigate(`/grupos-receta/${idGrupo}`)
+        }
+
+        return // Navigate after first — don't batch
+
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Error al subir'
+        setArchivoEstado(archivo.uid, 'error', 0, undefined, msg)
+        toast.error(`Error: ${msg}`)
+        setSubiendo(false)
+        return
       }
     }
-
-    setUploading(false)
-
-    // If all succeeded, navigate away
-    const latest = pendingFiles.map(p =>
-      toUpload.find(t => t.id === p.id) ? { ...p, status: 'ok' as const } : p
-    )
-    const allOk = latest.every(p => p.status === 'ok')
-    if (allOk) navigate(`/grupos-receta/${idGrupo}`)
   }
 
   // ── No group selected ─────────────────────────────────────────────────────
@@ -249,183 +303,170 @@ export default function SubirImagenPage() {
     return <GrupoSelector onSelect={id => setIdGrupoOverride(id)} />
   }
 
-  // ── Pending list stats ────────────────────────────────────────────────────
+  // ── Derived state ─────────────────────────────────────────────────────────
 
-  const pendienteCount = pendingFiles.filter(p => p.status === 'pendiente').length
-  const okCount = pendingFiles.filter(p => p.status === 'ok').length
-  const errorCount = pendingFiles.filter(p => p.status === 'error').length
-  const hasAnyPending = pendienteCount > 0
+  const pendienteCount = archivos.filter(a => a.estado === 'pendiente').length
+  const okCount        = archivos.filter(a => a.estado === 'completado').length
+  const errorCount     = archivos.filter(a => a.estado === 'error').length
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-6 max-w-2xl mx-auto">
-      <PageHeader
-        title="Subir Imágenes"
-        subtitle={`Grupo: ${idGrupo}`}
-        actions={
-          <button
-            onClick={() => navigate(-1)}
-            className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 text-sm"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Volver
-          </button>
-        }
-      />
+    <>
+      {/* OCR overlay */}
+      {subiendo && <OcrOverlay progreso={progreso} />}
 
-      <div className="space-y-6">
-        {/* Tabs */}
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          {/* Tab nav */}
-          <div className="flex border-b border-gray-200">
-            {(['galeria', 'camara'] as TabId[]).map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === tab
-                    ? 'border-blue-600 text-blue-600 bg-blue-50/50'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {tab === 'camara' ? (
-                  <><Camera className="w-4 h-4" /> Cámara</>
-                ) : (
-                  <><Images className="w-4 h-4" /> Galería</>
-                )}
-              </button>
-            ))}
-          </div>
+      <div className="p-6 max-w-2xl mx-auto">
+        <PageHeader
+          title="Subir Imagen"
+          subtitle={`Grupo: ${idGrupo.slice(0, 8)}...`}
+          actions={
+            <button
+              onClick={() => navigate(-1)}
+              className="inline-flex items-center gap-2 text-gray-600 hover:text-gray-900 text-sm"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Volver
+            </button>
+          }
+        />
 
-          {/* Tab content */}
-          <div className="p-5">
-            {activeTab === 'camara' ? (
-              <CamaraCaptura
-                onCaptura={onCaptura}
-                onCancelar={() => setActiveTab('galeria')}
-              />
-            ) : (
-              <GaleriaImport onArchivos={onArchivosGaleria} />
-            )}
-          </div>
-        </div>
-
-        {/* Pending files list */}
-        {pendingFiles.length > 0 && (
+        <div className="space-y-6">
+          {/* Tabs */}
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-              <p className="text-sm font-semibold text-gray-800">
-                Archivos a subir
-                <span className="ml-2 text-xs font-normal text-gray-400">
-                  {okCount > 0 && `${okCount} subidos · `}
-                  {errorCount > 0 && `${errorCount} con error · `}
-                  {pendienteCount} pendiente{pendienteCount !== 1 ? 's' : ''}
-                </span>
-              </p>
-              {!uploading && pendienteCount > 0 && (
+            <div className="flex border-b border-gray-200">
+              {(['galeria', 'camara'] as TabId[]).map(t => (
                 <button
-                  onClick={() =>
-                    setPendingFiles(prev => prev.filter(p => p.status !== 'ok'))
-                  }
-                  className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                  key={t}
+                  onClick={() => setActiveTab(t)}
+                  className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium border-b-2 transition-colors ${
+                    activeTab === t
+                      ? 'border-blue-600 text-blue-600 bg-blue-50/50'
+                      : 'border-transparent text-gray-500 hover:text-gray-700'
+                  }`}
                 >
-                  Limpiar completados
+                  {t === 'camara' ? (
+                    <><Camera className="w-4 h-4" /> Cámara</>
+                  ) : (
+                    <><Images className="w-4 h-4" /> Galería</>
+                  )}
                 </button>
+              ))}
+            </div>
+            <div className="p-5">
+              {activeTab === 'camara' ? (
+                <CamaraCaptura onCaptura={onCaptura} onCancelar={() => setActiveTab('galeria')} />
+              ) : (
+                <GaleriaImport onArchivos={onArchivosGaleria} />
               )}
             </div>
+          </div>
 
-            <ul className="divide-y divide-gray-100">
-              {pendingFiles.map(entry => (
-                <li key={entry.id} className="flex items-center gap-3 p-3">
-                  {/* Thumbnail */}
-                  <div className="w-12 h-12 rounded-lg overflow-hidden bg-gray-100 shrink-0 flex items-center justify-center">
-                    {entry.preview ? (
-                      <img
-                        src={entry.preview}
-                        alt={entry.file.name}
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <Upload className="w-5 h-5 text-gray-400" />
-                    )}
-                  </div>
+          {/* Queue list */}
+          {archivos.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+                <p className="text-sm font-semibold text-gray-800">
+                  Archivos a subir
+                  <span className="ml-2 text-xs font-normal text-gray-400">
+                    {okCount > 0 && `${okCount} subidos · `}
+                    {errorCount > 0 && `${errorCount} con error · `}
+                    {pendienteCount} pendiente{pendienteCount !== 1 ? 's' : ''}
+                  </span>
+                </p>
+                {!subiendo && okCount > 0 && (
+                  <button
+                    onClick={() => setArchivos(a => a.filter(x => x.estado !== 'completado'))}
+                    className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                  >
+                    Limpiar completados
+                  </button>
+                )}
+              </div>
 
-                  {/* Info + progress */}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-0.5">
-                      <p className="text-sm font-medium text-gray-800 truncate">
-                        {entry.file.name}
-                      </p>
-                      <span className="text-xs text-gray-400 shrink-0">
-                        {formatBytes(entry.file.size)}
-                      </span>
-                      <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded shrink-0">
-                        {entry.origen === 'CAMARA' ? 'Cámara' : 'Galería'}
-                      </span>
+              <ul className="divide-y divide-gray-100">
+                {archivos.map(archivo => (
+                  <li key={archivo.uid} className="flex items-center gap-3 p-3">
+                    {/* Thumbnail */}
+                    <div className="w-12 h-12 rounded-lg overflow-hidden bg-gray-100 shrink-0 flex items-center justify-center">
+                      {archivo.preview ? (
+                        <img
+                          src={archivo.preview}
+                          alt={archivo.file.name}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Upload className="w-5 h-5 text-gray-400" />
+                      )}
                     </div>
 
-                    {entry.status === 'subiendo' && (
-                      <div className="w-full bg-gray-200 rounded-full h-1.5 mt-1">
-                        <div
-                          className="bg-blue-600 h-1.5 rounded-full transition-all"
-                          style={{ width: `${entry.progress}%` }}
-                        />
+                    {/* Info */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <p className="text-sm font-medium text-gray-800 truncate">
+                          {archivo.file.name}
+                        </p>
+                        <span className="text-xs text-gray-400 shrink-0">
+                          {formatBytes(archivo.file.size)}
+                        </span>
+                        <span className="text-xs bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded shrink-0">
+                          {archivo.origen === 'CAMARA' ? 'Cámara' : 'Galería'}
+                        </span>
                       </div>
-                    )}
-                    {entry.status === 'error' && (
-                      <p className="text-xs text-red-500 flex items-center gap-1 mt-0.5">
-                        <AlertCircle className="w-3 h-3" />
-                        {entry.errorMsg}
-                      </p>
-                    )}
-                  </div>
+                      {archivo.estado === 'error' && (
+                        <p className="text-xs text-red-500 flex items-center gap-1 mt-0.5">
+                          <AlertCircle className="w-3 h-3" />
+                          {archivo.error}
+                        </p>
+                      )}
+                      {archivo.estado === 'pendiente' && (
+                        <p className="text-xs text-gray-400 mt-0.5">En espera</p>
+                      )}
+                      {(archivo.estado === 'subiendo' || archivo.estado === 'ocr') && (
+                        <p className="text-xs text-blue-500 animate-pulse mt-0.5">
+                          {archivo.progreso < 20 ? 'Subiendo...' : 'Procesando OCR...'}
+                        </p>
+                      )}
+                    </div>
 
-                  {/* Status icon / remove */}
-                  <div className="shrink-0">
-                    {entry.status === 'subiendo' && (
-                      <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />
-                    )}
-                    {entry.status === 'ok' && (
-                      <CheckCircle className="w-5 h-5 text-green-500" />
-                    )}
-                    {entry.status === 'error' && (
-                      <AlertCircle className="w-5 h-5 text-red-500" />
-                    )}
-                    {entry.status === 'pendiente' && !uploading && (
-                      <button
-                        onClick={() => removeFile(entry.id)}
-                        className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                        title="Quitar"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
+                    {/* Status icon / remove */}
+                    <div className="shrink-0">
+                      {archivo.estado === 'completado' && (
+                        <CheckCircle className="w-5 h-5 text-green-500" />
+                      )}
+                      {archivo.estado === 'error' && (
+                        <AlertCircle className="w-5 h-5 text-red-500" />
+                      )}
+                      {archivo.estado === 'pendiente' && !subiendo && (
+                        <button
+                          onClick={() => setArchivos(a => a.filter(x => x.uid !== archivo.uid))}
+                          className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                          title="Quitar"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
 
-            {/* Upload button */}
-            <div className="px-4 py-3 border-t border-gray-100 flex justify-end">
-              <button
-                onClick={subirTodo}
-                disabled={uploading || !hasAnyPending}
-                className="inline-flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-              >
-                {uploading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
+              {/* Footer */}
+              <div className="px-4 py-3 border-t border-gray-100 flex justify-end">
+                <button
+                  onClick={handleSubirTodo}
+                  disabled={subiendo || pendienteCount === 0}
+                  className="inline-flex items-center gap-2 bg-blue-600 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                >
                   <Upload className="w-4 h-4" />
-                )}
-                {uploading
-                  ? 'Subiendo...'
-                  : `Subir todo (${pendienteCount})`}
-              </button>
+                  ⬆ Subir {pendienteCount} imagen{pendienteCount !== 1 ? 'es' : ''}
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
-    </div>
+    </>
   )
 }
+

@@ -1,5 +1,6 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using RecetasOCR.Application.Common.Interfaces;
 using RecetasOCR.Application.DTOs.Ocr;
 using RecetasOCR.Application.DTOs.Paginacion;
@@ -12,7 +13,9 @@ public record GetColaOcrQuery(
     int     PageSize   = 20
 ) : IRequest<PagedResultDto<ColaOcrItemDto>>;
 
-public class GetColaOcrQueryHandler(IRecetasOcrDbContext db)
+public class GetColaOcrQueryHandler(
+    IRecetasOcrDbContext             db,
+    ILogger<GetColaOcrQueryHandler>  logger)
     : IRequestHandler<GetColaOcrQuery, PagedResultDto<ColaOcrItemDto>>
 {
     public async Task<PagedResultDto<ColaOcrItemDto>> Handle(
@@ -24,40 +27,51 @@ public class GetColaOcrQueryHandler(IRecetasOcrDbContext db)
         var offset   = (page - 1) * pageSize;
         var estado   = query.EstadoCola;
 
-        var total = await db.Database
-            .SqlQuery<int>($"""
-                SELECT COUNT(*) AS Value
-                FROM   ocr.ColaProcesamiento
-                WHERE  ({estado} IS NULL OR EstadoCola = {estado})
-                """)
-            .FirstAsync(ct);
+        try
+        {
+            var total = await db.Database
+                .SqlQuery<int>($"""
+                    SELECT COUNT(*) AS Value
+                    FROM   ocr.ColaProcesamiento
+                    WHERE  ({estado} IS NULL OR EstadoCola = {estado})
+                    """)
+                .FirstOrDefaultAsync(ct);
 
-        if (total == 0)
+            if (total == 0)
+                return PagedResultDto<ColaOcrItemDto>.Empty(page, pageSize);
+
+            var rows = await db.Database
+                .SqlQuery<ColaOcrRow>($"""
+                    SELECT c.Id, c.IdImagen,
+                           i.NombreArchivo,
+                           c.EstadoCola, c.Prioridad, c.Intentos, c.MaxIntentos,
+                           c.Bloqueado, c.WorkerProcesando,
+                           c.FechaEncolado, c.FechaInicioProceso
+                    FROM   ocr.ColaProcesamiento c
+                    INNER  JOIN rec.Imagenes i ON i.Id = c.IdImagen
+                    WHERE  ({estado} IS NULL OR c.EstadoCola = {estado})
+                    ORDER  BY c.Prioridad ASC, c.FechaEncolado ASC
+                    OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY
+                    """)
+                .ToListAsync(ct);
+
+            var items = rows
+                .Select(r => new ColaOcrItemDto(
+                    r.Id, r.IdImagen, r.NombreArchivo, r.EstadoCola,
+                    r.Prioridad, r.Intentos, r.MaxIntentos, r.Bloqueado,
+                    r.WorkerProcesando, r.FechaEncolado, r.FechaInicioProceso))
+                .ToList();
+
+            return new PagedResultDto<ColaOcrItemDto>(items, total, page, pageSize);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex,
+                "Error al consultar cola OCR (EstadoCola={Estado}, Page={Page}). " +
+                "Retornando resultado vacío para no bloquear el dashboard.",
+                estado, page);
             return PagedResultDto<ColaOcrItemDto>.Empty(page, pageSize);
-
-        var rows = await db.Database
-            .SqlQuery<ColaOcrRow>($"""
-                SELECT c.Id, c.IdImagen,
-                       i.NombreArchivo,
-                       c.EstadoCola, c.Prioridad, c.Intentos, c.MaxIntentos,
-                       c.Bloqueado, c.WorkerProcesando,
-                       c.FechaEncolado, c.FechaInicioProceso
-                FROM   ocr.ColaProcesamiento c
-                INNER  JOIN rec.Imagenes i ON i.Id = c.IdImagen
-                WHERE  ({estado} IS NULL OR c.EstadoCola = {estado})
-                ORDER  BY c.Prioridad ASC, c.FechaEncolado ASC
-                OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY
-                """)
-            .ToListAsync(ct);
-
-        var items = rows
-            .Select(r => new ColaOcrItemDto(
-                r.Id, r.IdImagen, r.NombreArchivo, r.EstadoCola,
-                r.Prioridad, r.Intentos, r.MaxIntentos, r.Bloqueado,
-                r.WorkerProcesando, r.FechaEncolado, r.FechaInicioProceso))
-            .ToList();
-
-        return new PagedResultDto<ColaOcrItemDto>(items, total, page, pageSize);
+        }
     }
 
     private sealed record ColaOcrRow(

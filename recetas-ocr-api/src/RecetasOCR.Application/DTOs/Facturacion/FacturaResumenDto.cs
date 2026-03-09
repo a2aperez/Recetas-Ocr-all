@@ -7,7 +7,7 @@ public record FacturaResumenDto(
     string    RFC,
     decimal   Total,
     DateOnly? FechaConsulta,
-    DateTime  FechaTimbrado,
+    DateTime? FechaTimbrado,
     string    Estado,
-    string    NombreAseguradora
+    string?   NombreAseguradora   // nullable: LEFT JOIN puede no encontrar aseguradora
 );

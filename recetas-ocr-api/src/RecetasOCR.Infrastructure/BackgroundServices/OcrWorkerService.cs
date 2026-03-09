@@ -9,16 +9,17 @@ using RecetasOCR.Infrastructure.Persistence.Entities;
 namespace RecetasOCR.Infrastructure.BackgroundServices;
 
 /// <summary>
-/// Worker que hace polling a ocr.ColaProcesamiento cada N segundos (cfg: OCR_WORKER_POLLING_SEG).
-/// Sin Service Bus. Sin librerías OCR locales.
-/// Bloqueo optimista: UPDATE con WHERE Bloqueado=0, verifica RowsAffected=1.
+/// Worker de REINTENTOS: hace polling a ocr.ColaProcesamiento cada N segundos (cfg: OCR_WORKER_POLLING_SEG, default 60).
+/// Solo recupera imágenes atascadas: PENDIENTE + Bloqueado=false + FechaEncolado &gt; 5 min.
+/// El flujo principal de OCR lo ejecuta SubirImagenCommandHandler de forma síncrona.
+/// Este worker es el safety net para imágenes que fallaron en el flujo síncrono.
 ///
 /// FLUJO POR IMAGEN:
-///  1. Tomar siguiente item PENDIENTE de la cola (bloqueo optimista)
+///  1. Tomar item PENDIENTE con más de 5 minutos sin procesar (bloqueo optimista)
 ///  2. Llamar a IOcrApiService.ProcesarImagenAsync con UrlBlobRaw
 ///  3. Si legible   → subir a recetas-ocr,        estado = OCR_APROBADO | OCR_BAJA_CONFIANZA
 ///  4. Si ilegible  → subir a recetas-ilegibles,   estado = ILEGIBLE  (raw NO se elimina)
-///  5. Insertar en aud.HistorialEstadosImagen y aud.LogProcesamiento
+///  5. Insertar en aud.HistorialEstadosImagen y aud.LogProcesamiento (Mensaje="Reintento Worker")
 ///  6. Actualizar ocr.ColaProcesamiento (COMPLETADO | FALLIDO)
 /// </summary>
 public class OcrWorkerService : BackgroundService
@@ -58,12 +59,12 @@ public class OcrWorkerService : BackgroundService
             {
                 using var pollingScope = _scopeFactory.CreateScope();
                 var p = pollingScope.ServiceProvider.GetRequiredService<IParametrosService>();
-                pollingSegs = await p.ObtenerIntAsync("OCR_WORKER_POLLING_SEG", 3, stoppingToken);
+                pollingSegs = await p.ObtenerIntAsync("OCR_WORKER_POLLING_SEG", 60, stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "No se pudo leer el parámetro OCR_WORKER_POLLING_SEG; usando valor por defecto de 3 s.");
-                pollingSegs = 3;
+                _logger.LogWarning(ex, "No se pudo leer el parámetro OCR_WORKER_POLLING_SEG; usando valor por defecto de 60 s.");
+                pollingSegs = 60;
             }
 
             await Task.Delay(TimeSpan.FromSeconds(pollingSegs), stoppingToken);
@@ -73,15 +74,20 @@ public class OcrWorkerService : BackgroundService
     // Exposed as internal to allow unit-testing via a testable subclass.
     internal async Task ProcesarSiguienteAsync(CancellationToken ct)
     {
+        _logger.LogDebug("Worker reintento: buscando imágenes atascadas > 5 min");
+
         using var scope         = _scopeFactory.CreateScope();
         var db                  = scope.ServiceProvider.GetRequiredService<RecetasOcrDbContext>();
         var ocrApiService       = scope.ServiceProvider.GetRequiredService<IOcrApiService>();
         var blobStorage         = scope.ServiceProvider.GetRequiredService<IBlobStorageService>();
         var parametros          = scope.ServiceProvider.GetRequiredService<IParametrosService>();
 
-        // ── 1. Tomar siguiente item PENDIENTE ──────────────────────────────────
+        // ── 1. Tomar siguiente item PENDIENTE atascado (más de 5 min sin procesar) ────
+        // Imágenes nuevas las procesa SubirImagenCommandHandler síncronamente.
+        // Este worker solo recupera las que fallaron (FechaEncolado > 5 min atrás).
+        var cutoff = DateTime.UtcNow.AddMinutes(-5);
         var item = await db.ColaProcesamientos
-            .Where(c => c.EstadoCola == "PENDIENTE" && !c.Bloqueado)
+            .Where(c => c.EstadoCola == "PENDIENTE" && !c.Bloqueado && c.FechaEncolado < cutoff)
             .OrderBy(c => c.Prioridad)
             .ThenBy(c => c.FechaEncolado)
             .FirstOrDefaultAsync(ct);
@@ -108,22 +114,39 @@ public class OcrWorkerService : BackgroundService
 
             var estadoAnteriorId = imagen.IdEstadoImagen;
 
-            // ── 4. Llamar al servicio OCR ────────────────────────────────────────
-            // NadroOcrApiService ya insertó ocr.ResultadosOCR, ocr.ResultadosExtraccion,
-            // actualizó el grupo con datos del paciente/médico e insertó medicamentos.
-            var resultado = await ocrApiService.ProcesarImagenAsync(
-                item.UrlBlobRaw, item.IdImagen, ct);
+            // ── 4. Descargar imagen del blob para reintento OCR ──────────────────
+            byte[] imageBytes;
+            string mimeType;
+            {
+                using var ms = new MemoryStream();
+                await using var rawStream = await blobStorage.DescargarAsync(item.UrlBlobRaw, ct);
+                await rawStream.CopyToAsync(ms, ct);
+                imageBytes = ms.ToArray();
+                var ext = Path.GetExtension(Path.GetFileName(
+                    new Uri(item.UrlBlobRaw).AbsolutePath)).ToLowerInvariant();
+                mimeType = ext switch
+                {
+                    ".jpg" or ".jpeg" => "image/jpeg",
+                    ".png"            => "image/png",
+                    ".pdf"            => "application/pdf",
+                    ".heic"           => "image/heic",
+                    _                 => "image/jpeg"
+                };
+            }
 
-            // ── 5. Resolver estado y subir blob secundario ───────────────────────
+            // ── 5. Llamar al servicio OCR ─────────────────────────────────────────
+            var resultado = await ocrApiService.ProcesarImagenAsync(
+                item.UrlBlobRaw, item.IdImagen, imageBytes, mimeType, ct);
+
+            // ── 6. Resolver estado y subir blob secundario ────────────────────────
             string estadoClave;
 
             if (resultado.Exitoso && resultado.EsLegible)
             {
                 estadoClave = resultado.EsConfianzaBaja ? "OCR_BAJA_CONFIANZA" : "OCR_APROBADO";
 
-                // Descargar raw y subir copia anotada a recetas-ocr
-                await using var stream = await blobStorage.DescargarAsync(item.UrlBlobRaw, ct);
-                var urlOcr = await blobStorage.SubirOcrAsync(stream, imagen.NombreArchivo, ct);
+                using var ocrStream = new MemoryStream(imageBytes);
+                var urlOcr = await blobStorage.SubirOcrAsync(ocrStream, imagen.NombreArchivo, ct);
 
                 imagen.UrlBlobOcr       = urlOcr;
                 imagen.EsLegible        = true;
@@ -133,13 +156,12 @@ public class OcrWorkerService : BackgroundService
             {
                 estadoClave = "ILEGIBLE";
 
-                // Subir copia al contenedor de ilegibles; raw permanece intacto
-                await using var stream = await blobStorage.DescargarAsync(item.UrlBlobRaw, ct);
-                var urlIlegible = await blobStorage.SubirIlegibleAsync(stream, imagen.NombreArchivo, ct);
+                using var ilegStream = new MemoryStream(imageBytes);
+                var urlIlegible = await blobStorage.SubirIlegibleAsync(ilegStream, imagen.NombreArchivo, ct);
 
-                imagen.UrlBlobIlegible  = urlIlegible;
-                imagen.EsLegible        = false;
-                imagen.MotivoBajaCalidad = resultado.MotivoBajaCalidad;
+                imagen.UrlBlobIlegible   = urlIlegible;
+                imagen.EsLegible         = false;
+                imagen.MotivoBajaCalidad = resultado.Notas;
 
                 // Grupo requiere captura manual
                 var estadoGrupoId = await db.EstadosGrupos
@@ -154,7 +176,7 @@ public class OcrWorkerService : BackgroundService
                 // ── OCR falló ────────────────────────────────────────────────────
                 item.Intentos++;
                 var maxIntentos = await parametros.ObtenerIntAsync("OCR_MAX_INTENTOS", 3, ct);
-                item.ErrorMensaje = resultado.MensajeError?[..Math.Min(500, resultado.MensajeError?.Length ?? 0)];
+                item.ErrorMensaje = resultado.ErrorMensaje?[..Math.Min(500, resultado.ErrorMensaje?.Length ?? 0)];
 
                 if (item.Intentos >= maxIntentos)
                 {
@@ -192,6 +214,52 @@ public class OcrWorkerService : BackgroundService
 
             imagen.ModificadoPor       = _workerName;
             imagen.FechaActualizacion  = DateTime.UtcNow;
+
+            // Actualizar grupo con datos del OCR
+            if (resultado.Exitoso)
+            {
+                grupo.NombrePaciente         ??= resultado.NombrePaciente;
+                grupo.ApellidoPaterno        ??= resultado.ApellidoPaterno;
+                grupo.ApellidoMaterno        ??= resultado.ApellidoMaterno;
+                grupo.NombreMedico           ??= resultado.NombreMedico;
+                grupo.CedulaMedico           ??= resultado.CedulaMedico;
+                grupo.EspecialidadTexto      ??= resultado.EspecialidadMedico;
+                grupo.DescripcionDiagnostico ??= resultado.DiagnosticoTexto;
+                grupo.NominaPaciente         ??= resultado.Nomina;
+                grupo.Credencial             ??= resultado.Credencial;
+                grupo.Nur                    ??= resultado.NUR;
+                grupo.NumeroAutorizacion     ??= resultado.NumeroAutorizacion;
+                grupo.Elegibilidad           ??= resultado.Elegibilidad;
+
+                // INSERT medicamentos extraídos
+                foreach (var med in resultado.Medicamentos)
+                {
+                    db.MedicamentosReceta.Add(new MedicamentosRecetum
+                    {
+                        Id                    = Guid.NewGuid(),
+                        IdImagen              = item.IdImagen,
+                        IdGrupo               = imagen.IdGrupo,
+                        NombreComercial       = med.NombreComercial,
+                        SustanciaActiva       = med.SustanciaActiva,
+                        Presentacion          = med.Presentacion,
+                        Dosis                 = med.Dosis,
+                        CantidadTexto         = med.CantidadTexto,
+                        CantidadNumero        = med.CantidadNumero,
+                        UnidadCantidad        = med.UnidadCantidad,
+                        FrecuenciaTexto       = med.FrecuenciaTexto,
+                        FrecuenciaExpandida   = med.FrecuenciaExpandida,
+                        DuracionTexto         = med.DuracionTexto,
+                        DuracionDias          = med.DuracionDias,
+                        IndicacionesCompletas = med.Indicaciones,
+                        CodigoCie10           = med.CodigoCIE10,
+                        CodigoEan             = med.CodigoEAN,
+                        FechaCreacion         = DateTime.UtcNow,
+                        FechaActualizacion    = DateTime.UtcNow,
+                        FechaModificacion     = DateTime.UtcNow
+                    });
+                }
+            }
+
             grupo.FechaActualizacion   = DateTime.UtcNow;
 
             // ── 7. INSERT aud.HistorialEstadosImagen ─────────────────────────────
@@ -215,8 +283,8 @@ public class OcrWorkerService : BackgroundService
                 IdGrupo    = imagen.IdGrupo,
                 Paso       = "OCR_FIN",
                 Nivel      = resultado.Exitoso ? "INFO" : "ERROR",
-                Mensaje    = $"OCR {estadoClave} | Confianza: {resultado.ConfianzaPromedio:F2}%",
-                Detalle    = resultado.MensajeError,
+                Mensaje    = $"Reintento Worker | OCR {estadoClave} | Confianza: {resultado.ConfianzaPromedio:F2}%",
+                Detalle    = resultado.ErrorMensaje,
                 DuracionMs = (int)sw.ElapsedMilliseconds,
                 Servidor   = _workerName,
                 FechaEvento = DateTime.UtcNow

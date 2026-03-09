@@ -1,11 +1,12 @@
-import { useState, useRef } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useState, useRef, useEffect } from 'react'
+import api from '@/utils/axios.instance'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format } from 'date-fns'
 import toast from 'react-hot-toast'
 import {
   ArrowLeft, ZoomIn, ZoomOut, RotateCcw, Check, X, RefreshCw,
-  Plus, Trash2, Eye, ChevronDown,
+  Plus, Trash2, Eye, ChevronDown, CheckCircle, AlertCircle,
 } from 'lucide-react'
 import { imagenesApi } from '@/api/imagenes.api'
 import { gruposRecetaApi } from '@/api/grupos-receta.api'
@@ -39,12 +40,35 @@ function Modal({
 
 // ─── Image viewer ─────────────────────────────────────────────────────────────
 
+function useBlobUrl(imagenId: string | undefined, tipo: 'raw' | 'ocr'): string | null {
+  const [url, setUrl] = useState<string | null>(null)
+  useEffect(() => {
+    if (!imagenId) return
+    let objectUrl: string | null = null
+    let cancelled = false
+    api.get(`/imagenes/${imagenId}/${tipo}`, { responseType: 'blob' })
+      .then(r => {
+        if (cancelled) return
+        objectUrl = URL.createObjectURL(r.data as Blob)
+        setUrl(objectUrl)
+      })
+      .catch(() => { if (!cancelled) setUrl(null) })
+    return () => {
+      cancelled = true
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [imagenId, tipo])
+  return url
+}
+
 function ImageViewer({ imagen }: { imagen: ImagenDto }) {
   const [showOcr, setShowOcr] = useState(false)
   const [zoom, setZoom] = useState(1)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const src = showOcr && imagen.urlBlobOcr ? imagen.urlBlobOcr : imagen.urlBlobRaw
+  const rawUrl = useBlobUrl(imagen.id, 'raw')
+  const ocrUrl = useBlobUrl(imagen.urlBlobOcr ? imagen.id : undefined, 'ocr')
+  const src = showOcr && ocrUrl ? ocrUrl : rawUrl
 
   return (
     <div className="flex flex-col gap-3 h-full">
@@ -92,12 +116,19 @@ function ImageViewer({ imagen }: { imagen: ImagenDto }) {
         ref={containerRef}
         className="flex-1 overflow-auto rounded-xl border border-gray-200 bg-gray-900 flex items-start justify-center p-2 min-h-[300px]"
       >
-        <img
-          src={src}
-          alt={`Hoja ${imagen.numeroHoja}`}
-          style={{ transform: `scale(${zoom})`, transformOrigin: 'top center', transition: 'transform 0.15s' }}
-          className="max-w-full rounded"
-        />
+        {src ? (
+          <img
+            src={src}
+            alt={`Hoja ${imagen.numeroHoja}`}
+            style={{ transform: `scale(${zoom})`, transformOrigin: 'top center', transition: 'transform 0.15s' }}
+            className="max-w-full rounded"
+          />
+        ) : (
+          <div className="flex flex-col items-center justify-center gap-3 text-gray-500 py-12">
+            <div className="w-8 h-8 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+            <p className="text-sm">Cargando imagen...</p>
+          </div>
+        )}
       </div>
 
       {/* Meta info */}
@@ -248,6 +279,56 @@ function MedicamentoRow({
   )
 }
 
+// ─── OCR Banner ──────────────────────────────────────────────────────────────
+
+function OcrBanner({ imagen }: { imagen: ImagenDto }) {
+  const score = imagen.scoreLegibilidad != null
+    ? `${imagen.scoreLegibilidad.toFixed(0)}%`
+    : null
+
+  if (imagen.estadoImagen === 'OCR_APROBADO') {
+    return (
+      <div className="mb-5 flex items-center gap-3 bg-green-50 border border-green-200 rounded-xl px-4 py-3">
+        <CheckCircle className="w-5 h-5 text-green-500 shrink-0" />
+        <p className="text-sm font-medium text-green-800">
+          Alta confianza{score ? ` (${score})` : ''} — solo confirma los datos
+        </p>
+      </div>
+    )
+  }
+
+  if (imagen.estadoImagen === 'OCR_BAJA_CONFIANZA') {
+    return (
+      <div className="mb-5 flex items-center gap-3 bg-yellow-50 border border-yellow-200 rounded-xl px-4 py-3">
+        <AlertCircle className="w-5 h-5 text-yellow-500 shrink-0" />
+        <p className="text-sm font-medium text-yellow-800">
+          Confianza baja{score ? ` (${score})` : ''} — revisa cada campo
+        </p>
+      </div>
+    )
+  }
+
+  if (imagen.estadoImagen === 'ILEGIBLE') {
+    return (
+      <div className="mb-5 flex items-center gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+        <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+        <p className="text-sm font-medium text-red-800">
+          Imagen ilegible — captura manual requerida
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="mb-5 flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+      <CheckCircle className="w-5 h-5 text-blue-500 shrink-0" />
+      <p className="text-sm font-medium text-blue-800">
+        ✓ OCR completado — revisa y confirma los datos extraídos
+      </p>
+    </div>
+  )
+}
+
 // ─── Data panel ───────────────────────────────────────────────────────────────
 
 function DatosPanel({
@@ -264,10 +345,13 @@ function DatosPanel({
       id: `new-${Date.now()}`,
       numeroPrescripcion: meds.length + 1,
       nombreComercial: null, sustanciaActiva: null, presentacion: null,
-      dosis: null, cantidadTexto: null, cantidadNumero: null,
+      dosis: null,
+      cantidad: null, cantidadTexto: null, cantidadNumero: null, unidadCantidad: null,
       frecuenciaTexto: null, frecuenciaExpandida: null,
       duracionTexto: null, duracionDias: null,
-      indicacionesCompletas: null, viaAdministracion: null,
+      indicaciones: null, indicacionesCompletas: null,
+      viaAdministracion: null,
+      codigoCIE10: null, codigoEAN: null, fuenteDato: null,
     }
     setMeds(prev => [...prev, nuevo])
   }
@@ -314,7 +398,7 @@ function DatosPanel({
                 key={m.id}
                 med={m}
                 idImagen={imagen.id}
-                onRemove={m.id.startsWith('new-') ? () => removeMedicamento(m.id) : undefined}
+                onRemove={m.id?.startsWith('new-') ? () => removeMedicamento(m.id!) : undefined}
               />
             ))}
           </div>
@@ -335,7 +419,7 @@ function AprobarDialog({
 }) {
   const [obs, setObs] = useState('')
   const { mutate, isPending } = useMutation({
-    mutationFn: () => revisionApi.aprobar(idImagen, obs || undefined),
+    mutationFn: () => revisionApi.aprobar({ idImagen, observaciones: obs || undefined }),
     onSuccess: () => {
       toast.success('Imagen aprobada correctamente')
       onDone()
@@ -384,7 +468,7 @@ function RechazarDialog({
 }) {
   const [motivo, setMotivo] = useState('')
   const { mutate, isPending } = useMutation({
-    mutationFn: () => revisionApi.rechazar(idImagen, motivo),
+    mutationFn: () => revisionApi.rechazar({ idImagen, motivo }),
     onSuccess: () => {
       toast.success('Imagen rechazada')
       onDone()
@@ -431,7 +515,10 @@ function RechazarDialog({
 export default function RevisionImagenPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
+
+  const ocrParam = searchParams.get('ocr') === 'true'
 
   const [showAprobar, setShowAprobar] = useState(false)
   const [showRechazar, setShowRechazar] = useState(false)
@@ -517,6 +604,9 @@ export default function RevisionImagenPage() {
         )}
       </div>
 
+      {/* OCR Banner */}
+      {ocrParam && <OcrBanner imagen={imagen} />}
+
       {/* 2-column layout */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left — image */}
@@ -547,7 +637,13 @@ export default function RevisionImagenPage() {
           className="inline-flex items-center gap-2 bg-green-600 text-white px-5 py-2.5 rounded-lg text-sm font-semibold hover:bg-green-700 transition-colors"
         >
           <Check className="w-4 h-4" />
-          Aprobar
+          {imagen.estadoImagen === 'OCR_APROBADO'
+            ? 'Confirmar y aprobar'
+            : imagen.estadoImagen === 'OCR_BAJA_CONFIANZA'
+            ? 'Validar y aprobar'
+            : imagen.estadoImagen === 'ILEGIBLE'
+            ? 'Guardar captura manual'
+            : 'Aprobar'}
         </button>
       </div>
 

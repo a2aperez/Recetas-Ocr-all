@@ -40,7 +40,7 @@ export function useSubirImagen() {
     onSuccess: (_, vars) => {
       qc.invalidateQueries({ queryKey: ['imagenes', 'by-grupo', vars.idGrupo] })
       qc.invalidateQueries({ queryKey: ['grupos-receta', 'detail', vars.idGrupo] })
-      toast.success('Imagen subida correctamente')
+      // Toast manejado por SubirImagenPage según resultado OCR
     },
     onError: (err: Error) => toast.error(err.message),
   })

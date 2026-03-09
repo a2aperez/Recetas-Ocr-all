@@ -3,20 +3,21 @@ using RecetasOCR.Application.DTOs;
 namespace RecetasOCR.Application.Common.Interfaces;
 
 /// <summary>
-/// Cliente para la API externa de OCR configurada en cfg.ConfiguracionesOCR.
-/// Sin librerías OCR locales (sin Tesseract).
-/// Usa Polly para reintentos con backoff exponencial.
-/// Registra cada llamada en ocr.ResultadosOCR.
+/// Cliente para la API externa de OCR de Nadro.
+/// Usa los bytes de la imagen directamente (sin re-descarga del blob).
+/// No accede a la base de datos — solo llama a la API y retorna el resultado parseado.
 /// </summary>
 public interface IOcrApiService
 {
     /// <summary>
     /// Envía la imagen al proveedor OCR activo y retorna el resultado.
-    /// Si la confianza es menor al umbral (cfg.Parametros[OCR_CONFIANZA_MINIMA])
+    /// Si la confianza es menor al umbral (cfg.Parametros[OCR_UMBRAL_CONFIANZA])
     /// el resultado es válido pero con EsConfianzaBaja=true — NO lanza excepción.
     /// </summary>
     Task<OcrResultadoDto> ProcesarImagenAsync(
         string urlBlobRaw,
-        Guid idImagen,
+        Guid   idImagen,
+        byte[] archivoBytes,
+        string mimeType,
         CancellationToken ct = default);
 }

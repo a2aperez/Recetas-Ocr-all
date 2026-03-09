@@ -17,6 +17,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: 'Subir Imágenes',   icon: '📷', to: '/imagenes/subir', permiso: 'IMAGENES.SUBIR' },
   { label: 'Cola de Revisión', icon: '🔍', to: '/revision',        permiso: 'REVISION.VER' },
   { label: 'Facturación',      icon: '🧾', to: '/facturacion',     permiso: 'FACTURACION.VER' },
+  { label: 'Configuración',    icon: '⚙️', to: '/configuracion/catalogos', permiso: 'CONFIG.EDITAR' },
   { label: 'Usuarios',         icon: '👥', to: '/usuarios',        permiso: 'USUARIOS.ADMINISTRAR' },
 ];
 

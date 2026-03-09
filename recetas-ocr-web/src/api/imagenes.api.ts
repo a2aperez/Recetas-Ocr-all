@@ -1,6 +1,6 @@
 import api from '@/utils/axios.instance'
 import type { ApiResponse } from '@/types/auth.types'
-import type { ImagenDto, OrigenImagen } from '@/types/imagen.types'
+import type { ImagenDto, ImagenConOcrDto, OrigenImagen } from '@/types/imagen.types'
 
 export const imagenesApi = {
   subir: async (
@@ -8,16 +8,21 @@ export const imagenesApi = {
     archivo: File,
     origenImagen: OrigenImagen,
     onProgress?: (pct: number) => void
-  ): Promise<string> => {
+  ): Promise<ImagenConOcrDto> => {
     const form = new FormData()
     form.append('idGrupo', idGrupo)
     form.append('archivo', archivo)
     form.append('origenImagen', origenImagen)
-    const { data } = await api.post<ApiResponse<string>>('/imagenes', form, {
+    const { data } = await api.post<ApiResponse<ImagenConOcrDto>>('/imagenes', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000, // 3 minutos — OCR puede tardar
       onUploadProgress: onProgress
         ? (e) => {
-            if (e.total) onProgress(Math.round((e.loaded * 100) / e.total))
+            if (e.total) {
+              // Upload es ~20% del tiempo total, OCR es el resto
+              const pct = Math.round((e.loaded / e.total) * 20)
+              onProgress(pct)
+            }
           }
         : undefined,
     })
@@ -29,8 +34,8 @@ export const imagenesApi = {
     return data.data!
   },
 
-  obtener: async (id: string): Promise<ImagenDto> => {
-    const { data } = await api.get<ApiResponse<ImagenDto>>(`/imagenes/${id}`)
+  obtener: async (id: string): Promise<ImagenConOcrDto> => {
+    const { data } = await api.get<ApiResponse<ImagenConOcrDto>>(`/imagenes/${id}`)
     return data.data!
   },
 }

@@ -1,383 +1,303 @@
-using System.Net.Http.Json;
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using RecetasOCR.Application.Common.Interfaces;
 using RecetasOCR.Application.DTOs;
-using RecetasOCR.Application.DTOs.Ocr;
-using RecetasOCR.Domain.Common;
-using RecetasOCR.Infrastructure.Persistence.Entities;
+using RecetasOCR.Application.DTOs.Imagenes;
 
 namespace RecetasOCR.Infrastructure.Services;
 
 /// <summary>
-/// Implementación de IOcrApiService que consume la API de Nadro OCR.
-/// Endpoint: POST https://concordia.nadro.dev/api/batch_recetas_medicas
-///
-/// NOTA: El HttpClient "NadroOcrClient" debe registrarse en Infrastructure DI con:
-///   - Polly WaitAndRetryAsync: 3 reintentos, backoff 2s / 4s / 8s
-///   - Polly CircuitBreakerAsync: 5 fallos consecutivos → abre 30 s
-///   - client.Timeout = 120 s
+/// Implementación de IOcrApiService que llama directamente a la API de Nadro OCR
+/// usando los bytes de la imagen en memoria (sin re-descarga del blob).
+/// No accede a la base de datos — solo HTTP + parse JSON.
+/// Registrada vía AddHttpClient&lt;IOcrApiService, NadroOcrApiService&gt;().
 /// </summary>
 public class NadroOcrApiService : IOcrApiService
 {
-    private const string EndpointUrl  = "https://concordia.nadro.dev/api/batch_recetas_medicas";
-    private const string ModeloNadro  = "gemini-2.5-flash-preview-05-20";
-    private const string ProveedorNadro = "gemini";
-
-    private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
-
-    private readonly IRecetasOcrDbContext   _ctx;
-    private readonly IBlobStorageService    _blob;
-    private readonly IParametrosService     _parametros;
-    private readonly IHttpClientFactory     _httpFactory;
+    private readonly HttpClient _httpClient;
     private readonly ILogger<NadroOcrApiService> _logger;
+    private readonly IParametrosService _parametros;
+
+    private const string ApiUrl = "https://concordia.nadro.dev/api/extract_receta_medica";
+    private const string ApiKey = "ocr_71fc83371dd8c0931db6e20f1d05cf1d";
+
+    private const string DefaultPrompt = @"Eres un sistema de OCR especializado en recetas médicas mexicanas del sector asegurador institucional.
+
+Extrae TODOS los datos visibles de esta receta médica y devuelve ÚNICAMENTE un objeto JSON válido, sin texto adicional, sin explicaciones, sin markdown.
+
+Estructura JSON requerida:
+{
+  ""aseguradora_detectada"": ""nombre o siglas de la aseguradora"",
+  ""formato_receta"": ""tipo de formato detectado"",
+  ""paciente"": {
+    ""nombre_completo"": ""nombre tal como aparece"",
+    ""apellido_paterno"": ""si es distinguible"",
+    ""apellido_materno"": ""si es distinguible"",
+    ""nombres"": ""nombre(s) de pila"",
+    ""fecha_nacimiento"": ""YYYY-MM-DD o null"",
+    ""nomina"": ""número de nómina si aparece"",
+    ""credencial"": ""número de credencial si aparece"",
+    ""nur"": ""Número Único de Receta si aparece"",
+    ""numero_autorizacion"": ""si aparece"",
+    ""elegibilidad"": ""tipo de elegibilidad si aparece"",
+    ""clave_dh"": ""clave derechohabiente si aparece"",
+    ""clave_beneficiario"": ""si aparece""
+  },
+  ""medico"": {
+    ""nombre_completo"": ""nombre tal como aparece"",
+    ""apellido_paterno"": ""si es distinguible"",
+    ""apellido_materno"": ""si es distinguible"",
+    ""nombres"": ""nombre(s) de pila"",
+    ""cedula_profesional"": ""número de cédula"",
+    ""clave_medico"": ""clave interna si aparece"",
+    ""especialidad"": ""especialidad médica si aparece"",
+    ""institucion"": ""nombre de la institución médica"",
+    ""direccion"": ""dirección del consultorio si aparece"",
+    ""telefono"": ""teléfono si aparece""
+  },
+  ""consulta"": {
+    ""fecha"": ""YYYY-MM-DD"",
+    ""hora"": ""HH:mm o null"",
+    ""diagnostico_texto"": ""diagnóstico escrito si aparece"",
+    ""codigo_cie10"": ""código CIE-10 si aparece""
+  },
+  ""medicamentos"": [
+    {
+      ""numero"": 1,
+      ""nombre_comercial"": ""nombre del medicamento tal como aparece"",
+      ""sustancia_activa"": ""principio activo si se menciona"",
+      ""presentacion"": ""tabletas, cápsulas, jarabe, etc."",
+      ""dosis"": ""100mg, 500mg, 5ml, etc."",
+      ""cantidad_texto"": ""cantidad en letras si aparece"",
+      ""cantidad_numero"": 30,
+      ""unidad_cantidad"": ""tabletas, cápsulas, frascos, etc."",
+      ""via_administracion"": ""oral, intramuscular, tópica, etc."",
+      ""frecuencia_texto"": ""cada 8 horas, 3 veces al día, etc."",
+      ""frecuencia_expandida"": ""Tomar 1 tableta cada 8 horas"",
+      ""duracion_texto"": ""30 días, 2 semanas, etc."",
+      ""duracion_dias"": 30,
+      ""indicaciones"": ""indicaciones completas de uso"",
+      ""codigo_cie10"": ""si aparece asociado al medicamento"",
+      ""numero_autorizacion"": ""si aparece por medicamento"",
+      ""codigo_ean"": ""código de barras si aparece""
+    }
+  ],
+  ""metadata_lectura"": {
+    ""calidad_lectura"": ""alta|media|baja"",
+    ""porcentaje_lectura"": 85,
+    ""campos_ilegibles"": [""lista de campos que no se pudieron leer""],
+    ""notas"": ""observaciones sobre la calidad""
+  }
+}
+REGLAS:
+1. Devuelve SOLO el JSON, sin bloques de código, sin texto antes ni después.
+2. Si un campo no es visible o legible, usa null.
+3. Las fechas siempre en formato YYYY-MM-DD.
+4. cantidad_numero y duracion_dias deben ser enteros.
+5. porcentaje_lectura es tu estimación de 0 a 100.";
 
     public NadroOcrApiService(
-        IRecetasOcrDbContext ctx,
-        IBlobStorageService blob,
-        IParametrosService parametros,
-        IHttpClientFactory httpFactory,
-        ILogger<NadroOcrApiService> logger)
+        HttpClient httpClient,
+        ILogger<NadroOcrApiService> logger,
+        IParametrosService parametros)
     {
-        _ctx        = ctx;
-        _blob       = blob;
-        _parametros = parametros;
-        _httpFactory = httpFactory;
+        _httpClient = httpClient;
+        _httpClient.Timeout = TimeSpan.FromMinutes(3);
         _logger     = logger;
+        _parametros = parametros;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     public async Task<OcrResultadoDto> ProcesarImagenAsync(
         string urlBlobRaw,
         Guid   idImagen,
+        byte[] archivoBytes,
+        string mimeType,
         CancellationToken ct = default)
     {
+        // Cargar umbral de confianza desde parámetros (async, antes del bloque síncrono de parseo)
+        var umbral = await _parametros.ObtenerDecimalAsync("OCR_UMBRAL_CONFIANZA", 70m, ct);
+
+        var sw = Stopwatch.StartNew();
+
         try
         {
-            // ── Cargar configuración OCR principal ──────────────────────────────
-            var config = await _ctx.Set<ConfiguracionesOcr>()
-                .Where(c => c.EsPrincipal && c.Activo)
-                .FirstOrDefaultAsync(ct);
+            _logger.LogInformation(
+                "Iniciando OCR síncrono para imagen {Id} ({MimeType})",
+                idImagen, mimeType);
 
-            if (config is null)
+            var base64  = Convert.ToBase64String(archivoBytes);
+            var payload = new { file = base64, mime_type = mimeType, prompt = DefaultPrompt };
+
+            var json    = JsonSerializer.Serialize(payload);
+            var request = new HttpRequestMessage(HttpMethod.Post, ApiUrl);
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+            request.Headers.TryAddWithoutValidation("X-API-Key", ApiKey);
+
+            var response = await _httpClient.SendAsync(request, ct);
+            var body     = await response.Content.ReadAsStringAsync(ct);
+
+            sw.Stop();
+            _logger.LogInformation(
+                "OCR completado para {Id}: HTTP {Status} en {Ms}ms",
+                idImagen, (int)response.StatusCode, sw.ElapsedMilliseconds);
+
+            if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError("No se encontró cfg.ConfiguracionesOCR activa con EsPrincipal=1.");
-                return FailDto("Configuración OCR no encontrada.");
+                _logger.LogError("OCR falló HTTP {Status}: {Body}", (int)response.StatusCode, body);
+                return OcrResultadoDto.Fallido($"Error HTTP {(int)response.StatusCode}");
             }
 
-            // ── Cargar entidades del dominio ────────────────────────────────────
-            var imagen = await _ctx.Set<Imagene>()
-                             .FirstOrDefaultAsync(i => i.Id == idImagen, ct)
-                         ?? throw new InvalidOperationException($"Imagen {idImagen} no encontrada.");
-
-            var grupo = await _ctx.Set<GruposRecetum>()
-                            .FirstOrDefaultAsync(g => g.Id == imagen.IdGrupo, ct)
-                        ?? throw new InvalidOperationException($"Grupo {imagen.IdGrupo} no encontrado.");
-
-            // ── PASO 1 — Descargar blob y convertir a Base64 ────────────────────
-            var nombreArchivo = Path.GetFileName(new Uri(urlBlobRaw).AbsolutePath);
-            var ext      = Path.GetExtension(nombreArchivo).ToLowerInvariant();
-            var mimeType = ext switch
-            {
-                ".jpg" or ".jpeg" => "image/jpeg",
-                ".png"            => "image/png",
-                ".pdf"            => "application/pdf",
-                ".heic"           => "image/heic",
-                _                 => "image/jpeg"
-            };
-
-            string base64;
-            using (var blobStream = await _blob.DescargarAsync(urlBlobRaw, ct))
-            using (var ms = new MemoryStream())
-            {
-                await blobStream.CopyToAsync(ms, ct);
-                base64 = Convert.ToBase64String(ms.ToArray());
-            }
-
-            // ── PASO 2 — Construir request batch ────────────────────────────────
-            var requestBody = new
-            {
-                files = new[]
-                {
-                    new { name = nombreArchivo, data = base64 }
-                },
-                model       = ModeloNadro,
-                provider    = ProveedorNadro,
-                concurrency = 1,
-                type        = "receta"
-            };
-
-            // ── PASO 3 — POST con HttpClient configurado con Polly ──────────────
-            // NOTA: ApiKeyEncriptada puede requerir descifrado si se almacena cifrada en BD.
-            var http = _httpFactory.CreateClient("NadroOcrClient");
-            http.DefaultRequestHeaders.Remove("X-API-Key");
-            http.DefaultRequestHeaders.Add("X-API-Key", config.ApiKeyEncriptada ?? "");
-
-            var fechaPeticion = DateTime.UtcNow;
-            var httpResponse  = await http.PostAsJsonAsync(EndpointUrl, requestBody, ct);
-            var fechaRespuesta = DateTime.UtcNow;
-            var duracionMs    = (int)(fechaRespuesta - fechaPeticion).TotalMilliseconds;
-
-            var responseJson = await httpResponse.Content.ReadAsStringAsync(ct);
-
-            // ── PASO 4 — Parsear NadroBatchResponseDto ───────────────────────────
-            NadroBatchResponseDto? batchResponse = null;
-            try
-            {
-                batchResponse = JsonSerializer.Deserialize<NadroBatchResponseDto>(responseJson, JsonOpts);
-            }
-            catch (JsonException ex)
-            {
-                _logger.LogError(ex, "Error deserializando respuesta Nadro OCR para imagen {IdImagen}", idImagen);
-            }
-
-            var fileResult  = batchResponse?.Results?.FirstOrDefault();
-            bool ocrExitoso = httpResponse.IsSuccessStatusCode
-                              && batchResponse?.Success == true
-                              && fileResult?.Success == true;
-
-            // ── PASO 5 — Determinar legibilidad ──────────────────────────────────
-            var pagina   = fileResult?.Data?.Paginas?.FirstOrDefault();
-            var metadata = fileResult?.Data?.Metadata;
-            var metaLect = pagina?.MetadataLectura;
-
-            decimal confianza = metaLect?.PorcentajeLectura ?? 0;
-            decimal umbral    = await _parametros.ObtenerDecimalAsync(
-                                    Constantes.Parametros.OCR_CONFIANZA_MINIMA, 70m, ct);
-
-            bool esLegible       = !string.Equals(metaLect?.CalidadLectura, "ilegible",
-                                        StringComparison.OrdinalIgnoreCase);
-            bool esBajaConfianza = confianza < umbral;
-
-            var camposIlegibles   = metaLect?.CamposIlegibles ?? new List<string>();
-            var motivoBajaCalidad = string.Join(", ",
-                camposIlegibles.Where(c => !string.IsNullOrWhiteSpace(c)));
-            if (!string.IsNullOrWhiteSpace(metaLect?.Notas))
-                motivoBajaCalidad = string.IsNullOrEmpty(motivoBajaCalidad)
-                    ? metaLect.Notas
-                    : $"{motivoBajaCalidad}. {metaLect.Notas}";
-
-            // ── PASO 6 — INSERT ocr.ResultadosOCR ────────────────────────────────
-            var tokensInput  = metadata?.TokensInput  ?? 0;
-            var tokensOutput = metadata?.TokensOutput ?? 0;
-            var costo = (tokensInput * 0.000001m) + (tokensOutput * 0.000003m);
-
-            var resultadoOcr = new ResultadosOcr
-            {
-                IdImagen           = idImagen,
-                IdConfiguracionOcr = config.Id,
-                ProveedorOcr       = metadata?.Proveedor ?? config.Proveedor,
-                ModeloUsado        = metadata?.Modelo    ?? config.Modelo,
-                UrlEndpointLlamado = EndpointUrl,
-                FechaPeticion      = fechaPeticion,
-                FechaRespuesta     = fechaRespuesta,
-                DuracionMs         = duracionMs,
-                TextoCompleto      = pagina is not null ? JsonSerializer.Serialize(pagina) : null,
-                ConfianzaPromedio  = ocrExitoso ? confianza : null,
-                IdiomaDetectado    = "spa",
-                PaginasProcesadas  = 1,
-                ResponseJsonCompleto = responseJson,
-                CostoEstimadoUsd   = costo,
-                FechaProceso       = fechaRespuesta,
-                Exitoso            = ocrExitoso,
-                CodigoErrorHttp    = ocrExitoso ? null : (int?)httpResponse.StatusCode,
-                MensajeError       = ocrExitoso ? null
-                                     : (fileResult?.Error ?? $"HTTP {(int)httpResponse.StatusCode}"),
-                FechaModificacion  = fechaRespuesta
-            };
-            _ctx.Set<ResultadosOcr>().Add(resultadoOcr);
-
-            if (!ocrExitoso)
-            {
-                imagen.EsLegible          = false;
-                imagen.ScoreLegibilidad   = 0;
-                imagen.FechaActualizacion = DateTime.UtcNow;
-                imagen.FechaModificacion  = DateTime.UtcNow;
-                await _ctx.SaveChangesAsync(ct);
-
-                return FailDto(fileResult?.Error ?? $"HTTP {(int)httpResponse.StatusCode}");
-            }
-
-            // ── PASO 7 — INSERT ocr.ResultadosExtraccion ─────────────────────────
-            // IdResultadoOcrNavigation permite que EF resuelva el FK tras SaveChanges.
-            var resultadoExtraccion = new ResultadosExtraccion
-            {
-                IdImagen                = idImagen,
-                IdResultadoOcrNavigation = resultadoOcr,
-                IdConfiguracionOcr      = config.Id,
-                Motor                   = "API_EXTERNA_OCR",
-                Jsonestructurado        = pagina is not null ? JsonSerializer.Serialize(pagina) : null,
-                ConfianzaExtraccion     = confianza,
-                CamposFaltantes         = string.Join(", ", camposIlegibles),
-                AseguradoraDetectada    = pagina?.AseguradoraDetectada,
-                FormatoDetectado        = pagina?.FormatoReceta,
-                TokensEntrada           = tokensInput,
-                TokensSalida            = tokensOutput,
-                CostoEstimadoUsd        = costo,
-                FechaProceso            = fechaRespuesta,
-                Exitoso                 = true,
-                FechaModificacion       = fechaRespuesta
-            };
-            _ctx.Set<ResultadosExtraccion>().Add(resultadoExtraccion);
-
-            // ── PASO 8 — UPDATE rec.GruposReceta (solo campos NOT NULL) ──────────
-            var paciente = pagina?.Paciente;
-            var medico   = pagina?.Medico;
-            var consulta = pagina?.Consulta;
-
-            if (paciente?.NombreCompleto     is not null) grupo.NombrePaciente       = paciente.NombreCompleto;
-            if (paciente?.ApellidoPaterno    is not null) grupo.ApellidoPaterno      = paciente.ApellidoPaterno;
-            if (paciente?.ApellidoMaterno    is not null) grupo.ApellidoMaterno      = paciente.ApellidoMaterno;
-            if (paciente?.Nombres            is not null) grupo.NombrePac            = paciente.Nombres;
-            if (paciente?.Nomina             is not null) grupo.NominaPaciente       = paciente.Nomina;
-            if (paciente?.Credencial         is not null) grupo.Credencial           = paciente.Credencial;
-            if (paciente?.Nur                is not null) grupo.Nur                  = paciente.Nur;
-            if (paciente?.NumeroAutorizacion is not null) grupo.NumeroAutorizacion   = paciente.NumeroAutorizacion;
-            if (paciente?.Elegibilidad       is not null) grupo.Elegibilidad         = paciente.Elegibilidad;
-            if (paciente?.ClaveDh            is not null) grupo.ClaveDh             = paciente.ClaveDh;
-            if (paciente?.ClaveBeneficiario  is not null) grupo.ClaveBeneficiario   = paciente.ClaveBeneficiario;
-
-            if (medico?.NombreCompleto    is not null) grupo.NombreMedico          = medico.NombreCompleto;
-            if (medico?.Nombres           is not null) grupo.NombreMedicoNombre    = medico.Nombres;
-            if (medico?.ApellidoPaterno   is not null) grupo.ApellidoPaternoMedico = medico.ApellidoPaterno;
-            if (medico?.ApellidoMaterno   is not null) grupo.ApellidoMaternoMedico = medico.ApellidoMaterno;
-            if (medico?.CedulaProfesional is not null) grupo.CedulaMedico          = medico.CedulaProfesional;
-            if (medico?.ClaveMedico       is not null) grupo.ClaveMedico           = medico.ClaveMedico;
-            if (medico?.Especialidad      is not null) grupo.EspecialidadTexto     = medico.Especialidad;
-            if (medico?.Institucion       is not null) grupo.InstitucionMedico     = medico.Institucion;
-            if (medico?.Direccion         is not null) grupo.DireccionMedico       = medico.Direccion;
-            if (medico?.Telefono          is not null) grupo.TelefonoMedico        = medico.Telefono;
-
-            if (consulta?.DiagnosticoTexto is not null) grupo.DescripcionDiagnostico = consulta.DiagnosticoTexto;
-            if (consulta?.CodigoCie10      is not null) grupo.CodigoCie10            = consulta.CodigoCie10;
-
-            if (consulta?.Fecha is not null && DateOnly.TryParse(consulta.Fecha, out var fechaConsulta))
-                grupo.FechaConsulta = fechaConsulta;
-            if (consulta?.Hora is not null && TimeOnly.TryParse(consulta.Hora, out var horaConsulta))
-                grupo.HoraConsulta = horaConsulta;
-
-            grupo.FechaActualizacion = DateTime.UtcNow;
-            grupo.FechaModificacion  = DateTime.UtcNow;
-
-            // ── PASO 9 — INSERT med.MedicamentosReceta ───────────────────────────
-            var medicamentosNadro = pagina?.Medicamentos ?? new List<NadroMedicamentoDto>();
-
-            // Pre-cargar vías de administración para evitar N+1 queries
-            var viasClaves = medicamentosNadro
-                .Where(m => !string.IsNullOrWhiteSpace(m.ViaAdministracion))
-                .Select(m => m.ViaAdministracion!)
-                .Distinct()
-                .ToList();
-
-            var viasDb = await _ctx.Set<ViasAdministracion>()
-                .Where(v => viasClaves.Contains(v.Clave))   // CI_AI collation maneja el case
-                .Select(v => new { v.Clave, v.Id })
-                .ToListAsync(ct);
-
-            var viaDict = viasDb.ToDictionary(
-                v => v.Clave,
-                v => v.Id,
-                StringComparer.OrdinalIgnoreCase);
-
-            foreach (var med in medicamentosNadro)
-            {
-                // Buscar en catálogo por nombre comercial (null si no existe — revisor lo completa)
-                int? idCatalogo = null;
-                if (!string.IsNullOrWhiteSpace(med.NombreComercial))
-                {
-                    var nombre = med.NombreComercial;
-                    idCatalogo = await _ctx.Set<Medicamento>()
-                        .Where(m => m.NombreComercial.Contains(nombre))
-                        .Select(m => (int?)m.Id)
-                        .FirstOrDefaultAsync(ct);
-                }
-
-                int? idVia = null;
-                if (!string.IsNullOrWhiteSpace(med.ViaAdministracion) &&
-                    viaDict.TryGetValue(med.ViaAdministracion, out var viaIdVal))
-                    idVia = viaIdVal;
-
-                _ctx.Set<MedicamentosRecetum>().Add(new MedicamentosRecetum
-                {
-                    IdImagen              = idImagen,
-                    IdGrupo               = imagen.IdGrupo,
-                    IdMedicamentoCatalogo = idCatalogo,
-                    NumeroPrescripcion    = med.Numero,
-                    NombreComercial       = med.NombreComercial,
-                    SustanciaActiva       = med.SustanciaActiva,
-                    Presentacion          = med.Presentacion,
-                    Dosis                 = med.Dosis,
-                    CodigoCie10           = med.CodigoCie10,
-                    CodigoEan             = med.CodigoEan,
-                    CantidadTexto         = med.CantidadTexto,
-                    CantidadNumero        = med.CantidadNumero,
-                    UnidadCantidad        = med.UnidadCantidad,
-                    IdViaAdministracion   = idVia,
-                    FrecuenciaTexto       = med.FrecuenciaTexto,
-                    FrecuenciaExpandida   = med.FrecuenciaExpandida,
-                    DuracionTexto         = med.DuracionTexto,
-                    DuracionDias          = med.DuracionDias,
-                    IndicacionesCompletas = med.Indicaciones,
-                    NumeroAutorizacion    = med.NumeroAutorizacion,
-                    Ivatasa               = 0.16m,
-                    Iepstasa              = 0m,
-                    FechaCreacion         = DateTime.UtcNow,
-                    FechaActualizacion    = DateTime.UtcNow,
-                    FechaModificacion     = DateTime.UtcNow
-                });
-            }
-
-            // Actualizar imagen con resultado OCR
-            imagen.EsLegible          = esLegible;
-            imagen.ScoreLegibilidad   = confianza;
-            imagen.MotivoBajaCalidad  = esBajaConfianza
-                                         ? (motivoBajaCalidad.Length > 0 ? motivoBajaCalidad : null)
-                                         : null;
-            imagen.FechaActualizacion = DateTime.UtcNow;
-            imagen.FechaModificacion  = DateTime.UtcNow;
-
-            // ── PASO 10 — UPDATE grupo.TotalMedicamentos ─────────────────────────
-            // CountAsync ejecuta SQL sobre lo ya persistido; sumamos los recién agregados al tracker.
-            var medsExistentes = await _ctx.Set<MedicamentosRecetum>()
-                .CountAsync(m => m.IdGrupo == imagen.IdGrupo, ct);
-            grupo.TotalMedicamentos = medsExistentes + medicamentosNadro.Count;
-
-            // ── PASO 11 — SaveChangesAsync (única escritura para toda la operación) ─
-            await _ctx.SaveChangesAsync(ct);
-
-            // ── PASO 12 — Retornar OcrResultadoDto completo ──────────────────────
-            return new OcrResultadoDto(
-                Exitoso:             true,
-                EsLegible:           esLegible,
-                EsConfianzaBaja:     esBajaConfianza,
-                ConfianzaPromedio:   confianza,
-                TextoCompleto:       resultadoOcr.TextoCompleto,
-                MotivoBajaCalidad:   motivoBajaCalidad.Length > 0 ? motivoBajaCalidad : null,
-                ResponseJsonCompleto: responseJson,
-                CostoEstimadoUsd:    costo,
-                MensajeError:        null);
+            return ParsearRespuestaOcr(body, idImagen, sw.ElapsedMilliseconds, umbral);
+        }
+        catch (TaskCanceledException)
+        {
+            _logger.LogWarning("OCR timeout para imagen {Id}", idImagen);
+            return OcrResultadoDto.Fallido("Timeout — la solicitud excedió 3 minutos");
         }
         catch (Exception ex)
         {
-            // NO relanzar — el Worker decide si reintentar vía ocr.ColaProcesamiento.Intentos.
-            _logger.LogError(ex,
-                "NadroOcrApiService.ProcesarImagenAsync falló para imagen {IdImagen}: {Message}",
-                idImagen, ex.Message);
-            return FailDto(ex.Message);
+            _logger.LogError(ex, "OCR excepción para imagen {Id}", idImagen);
+            return OcrResultadoDto.Fallido(ex.Message);
+        }
+    }
+
+    // ─── Parseo de la respuesta ────────────────────────────────────────────────
+
+    private OcrResultadoDto ParsearRespuestaOcr(
+        string body, Guid idImagen, long durationMs, decimal umbral)
+    {
+        try
+        {
+            // Limpiar posibles bloques markdown que la API pueda incluir
+            var jsonText = body.Trim();
+            if (jsonText.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
+                jsonText = jsonText[7..];
+            if (jsonText.StartsWith("```"))
+                jsonText = jsonText[3..];
+            if (jsonText.EndsWith("```"))
+                jsonText = jsonText[..^3];
+            jsonText = jsonText.Trim();
+
+            var doc = JsonSerializer.Deserialize<JsonElement>(jsonText);
+
+            var metadata = doc.TryGetProperty("metadata_lectura", out var meta)
+                ? meta : default;
+
+            var porcentaje = metadata.ValueKind != JsonValueKind.Undefined
+                && metadata.TryGetProperty("porcentaje_lectura", out var pct)
+                ? pct.GetDecimal() : 0m;
+
+            var calidad = metadata.ValueKind != JsonValueKind.Undefined
+                && metadata.TryGetProperty("calidad_lectura", out var cal)
+                ? cal.GetString() ?? "baja" : "baja";
+
+            var camposIlegibles = new List<string>();
+            if (metadata.ValueKind != JsonValueKind.Undefined
+                && metadata.TryGetProperty("campos_ilegibles", out var campos)
+                && campos.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var campo in campos.EnumerateArray())
+                {
+                    var s = campo.GetString();
+                    if (!string.IsNullOrWhiteSpace(s))
+                        camposIlegibles.Add(s);
+                }
+            }
+
+            var esLegible       = !string.Equals(calidad, "baja", StringComparison.OrdinalIgnoreCase)
+                                  && porcentaje > 0;
+            var esConfianzaBaja = esLegible && porcentaje < umbral;
+
+            var paciente = doc.TryGetProperty("paciente", out var pac) ? pac : default;
+            var medico   = doc.TryGetProperty("medico",   out var med) ? med : default;
+            var consulta = doc.TryGetProperty("consulta", out var con) ? con : default;
+
+            // Parsear medicamentos
+            var medicamentos = new List<MedicamentoOcrDto>();
+            if (doc.TryGetProperty("medicamentos", out var meds) &&
+                meds.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var m in meds.EnumerateArray())
+                {
+                    medicamentos.Add(new MedicamentoOcrDto
+                    {
+                        Numero             = GetInt(m, "numero"),
+                        NombreComercial    = GetStr(m, "nombre_comercial"),
+                        SustanciaActiva    = GetStr(m, "sustancia_activa"),
+                        Presentacion       = GetStr(m, "presentacion"),
+                        Dosis              = GetStr(m, "dosis"),
+                        CantidadTexto      = GetStr(m, "cantidad_texto"),
+                        CantidadNumero     = GetInt(m, "cantidad_numero"),
+                        UnidadCantidad     = GetStr(m, "unidad_cantidad"),
+                        ViaAdministracion  = GetStr(m, "via_administracion"),
+                        FrecuenciaTexto    = GetStr(m, "frecuencia_texto"),
+                        FrecuenciaExpandida = GetStr(m, "frecuencia_expandida"),
+                        DuracionTexto      = GetStr(m, "duracion_texto"),
+                        DuracionDias       = GetInt(m, "duracion_dias"),
+                        Indicaciones       = GetStr(m, "indicaciones"),
+                        CodigoCIE10        = GetStr(m, "codigo_cie10"),
+                        CodigoEAN          = GetStr(m, "codigo_ean")
+                    });
+                }
+            }
+
+            var notasOcr = metadata.ValueKind != JsonValueKind.Undefined
+                && metadata.TryGetProperty("notas", out var notas)
+                ? notas.GetString() : null;
+
+            return new OcrResultadoDto
+            {
+                IdImagen           = idImagen,
+                Exitoso            = true,
+                EsLegible          = esLegible,
+                EsConfianzaBaja    = esConfianzaBaja,
+                ConfianzaPromedio  = porcentaje,
+                CalidadLectura     = calidad,
+                CamposIlegibles    = camposIlegibles,
+                Notas              = notasOcr,
+                DuracionMs         = durationMs,
+
+                AseguradoraDetectada = GetStr(doc, "aseguradora_detectada"),
+                FormatoReceta        = GetStr(doc, "formato_receta"),
+
+                NombrePaciente    = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "nombre_completo")    : null,
+                ApellidoPaterno   = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "apellido_paterno")   : null,
+                ApellidoMaterno   = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "apellido_materno")   : null,
+                NombresPaciente   = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "nombres")            : null,
+                Nomina            = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "nomina")             : null,
+                Credencial        = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "credencial")         : null,
+                NUR               = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "nur")                : null,
+                NumeroAutorizacion = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "numero_autorizacion") : null,
+                Elegibilidad      = paciente.ValueKind != JsonValueKind.Undefined ? GetStr(paciente, "elegibilidad")       : null,
+
+                NombreMedico      = medico.ValueKind != JsonValueKind.Undefined ? GetStr(medico, "nombre_completo")    : null,
+                CedulaMedico      = medico.ValueKind != JsonValueKind.Undefined ? GetStr(medico, "cedula_profesional")  : null,
+                EspecialidadMedico = medico.ValueKind != JsonValueKind.Undefined ? GetStr(medico, "especialidad")       : null,
+                InstitucionMedico = medico.ValueKind != JsonValueKind.Undefined ? GetStr(medico, "institucion")         : null,
+
+                FechaConsulta    = consulta.ValueKind != JsonValueKind.Undefined ? GetStr(consulta, "fecha")              : null,
+                DiagnosticoTexto = consulta.ValueKind != JsonValueKind.Undefined ? GetStr(consulta, "diagnostico_texto")  : null,
+                CodigoCIE10      = consulta.ValueKind != JsonValueKind.Undefined ? GetStr(consulta, "codigo_cie10")       : null,
+
+                Medicamentos = medicamentos
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error parseando respuesta OCR para imagen {Id}", idImagen);
+            return OcrResultadoDto.Fallido($"Error parseando respuesta: {ex.Message}");
         }
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
-    private static OcrResultadoDto FailDto(string mensajeError) => new(
-        Exitoso:             false,
-        EsLegible:           false,
-        EsConfianzaBaja:     true,
-        ConfianzaPromedio:   0m,
-        TextoCompleto:       null,
-        MotivoBajaCalidad:   null,
-        ResponseJsonCompleto: null,
-        CostoEstimadoUsd:    0m,
-        MensajeError:        mensajeError);
+    private static string? GetStr(JsonElement el, string prop)
+        => el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() : null;
+
+    private static int? GetInt(JsonElement el, string prop)
+        => el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number
+            ? v.GetInt32() : null;
 }

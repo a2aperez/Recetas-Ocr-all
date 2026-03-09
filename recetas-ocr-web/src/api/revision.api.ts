@@ -1,7 +1,7 @@
 import api from '@/utils/axios.instance'
 import type { ApiResponse } from '@/types/auth.types'
 import type { EstadoOcrDto } from '@/types/ocr.types'
-import type { EstadoImagen } from '@/types/imagen.types'
+import type { EstadoImagen, MedicamentoRecetaDto } from '@/types/imagen.types'
 import type { PagedResultDto } from './grupos-receta.api'
 
 export interface CorregirCampoDto {
@@ -34,12 +34,38 @@ export const revisionApi = {
     return data.data!
   },
 
-  aprobar: async (idImagen: string, observaciones?: string): Promise<void> => {
-    await api.post('/revision/aprobar', { idImagen, observaciones })
+  aprobar: async (dto: {
+    idImagen: string
+    datosPaciente?: {
+      nombrePaciente?: string
+      apellidoPaterno?: string
+      apellidoMaterno?: string
+      nomina?: string
+      credencial?: string
+      nur?: string
+      elegibilidad?: string
+    }
+    datosMedico?: {
+      nombreMedico?: string
+      cedulaMedico?: string
+      especialidad?: string
+    }
+    datosConsulta?: {
+      fechaConsulta?: string
+      diagnosticoTexto?: string
+      codigoCIE10?: string
+    }
+    medicamentos?: MedicamentoRecetaDto[]
+    observaciones?: string
+  }): Promise<void> => {
+    await api.post('/revision/aprobar', dto)
   },
 
-  rechazar: async (idImagen: string, motivoRechazo: string): Promise<void> => {
-    await api.post('/revision/rechazar', { idImagen, motivoRechazo })
+  rechazar: async (dto: {
+    idImagen: string
+    motivo: string
+  }): Promise<void> => {
+    await api.post('/revision/rechazar', dto)
   },
 
   corregirCampo: async (
@@ -48,7 +74,7 @@ export const revisionApi = {
     campo: string,
     valorAnterior: string | null,
     valorNuevo: string,
-    tipoCorreccion: string
+    motivo: string
   ): Promise<void> => {
     await api.post<ApiResponse<EstadoOcrDto>>('/revision/corregir-campo', {
       idImagen,
@@ -56,7 +82,7 @@ export const revisionApi = {
       campo,
       valorAnterior,
       valorNuevo,
-      tipoCorreccion,
+      motivo,
     })
   },
 }

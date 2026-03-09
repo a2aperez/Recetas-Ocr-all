@@ -25,5 +25,6 @@ public record ImagenDto(
     bool     EsCapturaManual,
     string   EstadoImagen,
     string?  ModificadoPor,
-    DateTime FechaModificacion
+    DateTime FechaModificacion,
+    DatosOcrExtraidosDto? DatosOcr = null
 );

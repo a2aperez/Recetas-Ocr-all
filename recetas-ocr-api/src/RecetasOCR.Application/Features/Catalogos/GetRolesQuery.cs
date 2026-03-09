@@ -16,15 +16,14 @@ public class GetRolesQueryHandler(IRecetasOcrDbContext db)
     {
         var rows = await db.Database
             .SqlQuery<RolRow>($"""
-                SELECT Id, Clave, Nombre, Descripcion
+                SELECT Id, Clave, Nombre, Descripcion, Activo
                 FROM   seg.Roles
-                WHERE  Activo = 1
                 ORDER  BY Nombre ASC
                 """)
             .ToListAsync(ct);
 
         return rows
-            .Select(r => new RolDto(r.Id, r.Clave, r.Nombre, r.Descripcion))
+            .Select(r => new RolDto(r.Id, r.Clave, r.Nombre, r.Descripcion, r.Activo))
             .ToList();
     }
 
@@ -32,5 +31,6 @@ public class GetRolesQueryHandler(IRecetasOcrDbContext db)
         int     Id,
         string  Clave,
         string  Nombre,
-        string? Descripcion);
+        string? Descripcion,
+        bool    Activo);
 }

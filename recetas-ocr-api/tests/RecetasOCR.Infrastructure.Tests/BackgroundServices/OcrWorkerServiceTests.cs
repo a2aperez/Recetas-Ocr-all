@@ -159,16 +159,24 @@ public class OcrWorkerServiceTests
     }
 
     private static OcrResultadoDto OcrSuccess(bool esLegible, bool esConfianzaBaja, decimal confianza = 90m)
-        => new(Exitoso: true, EsLegible: esLegible, EsConfianzaBaja: esConfianzaBaja,
-               ConfianzaPromedio: confianza, TextoCompleto: null,
-               MotivoBajaCalidad: esLegible ? null : "Imagen borrosa",
-               ResponseJsonCompleto: null, CostoEstimadoUsd: 0m, MensajeError: null);
+        => new OcrResultadoDto
+        {
+            Exitoso = true,
+            EsLegible = esLegible,
+            EsConfianzaBaja = esConfianzaBaja,
+            ConfianzaPromedio = confianza,
+            Notas = esLegible ? null : "Imagen borrosa"
+        };
 
     private static OcrResultadoDto OcrFailure(string msg = "Timeout")
-        => new(Exitoso: false, EsLegible: false, EsConfianzaBaja: true,
-               ConfianzaPromedio: 0m, TextoCompleto: null,
-               MotivoBajaCalidad: null, ResponseJsonCompleto: null,
-               CostoEstimadoUsd: 0m, MensajeError: msg);
+        => new OcrResultadoDto
+        {
+            Exitoso = false,
+            EsLegible = false,
+            EsConfianzaBaja = true,
+            ConfianzaPromedio = 0m,
+            ErrorMensaje = msg
+        };
 
     private TestableOcrWorkerService BuildWorker(
         RecetasOcrDbContext       db,
@@ -203,7 +211,7 @@ public class OcrWorkerServiceTests
         await worker.InvokeProcesarAsync();
 
         ocrMock.Verify(
-            o => o.ProcesarImagenAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()),
+            o => o.ProcesarImagenAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
             Times.Never);
     }
 
@@ -217,7 +225,7 @@ public class OcrWorkerServiceTests
         var (_, imagenId) = SeedQueue(db);
 
         var (ocrMock, blobMock, paramMock) = DefaultMocks();
-        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<CancellationToken>()))
+        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                .ReturnsAsync(OcrSuccess(esLegible: true, esConfianzaBaja: false, confianza: 95m));
         blobMock.Setup(b => b.SubirOcrAsync(It.IsAny<Stream>(), NombreArchivo, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(BlobOcrUrl);
@@ -249,7 +257,7 @@ public class OcrWorkerServiceTests
         var (_, imagenId) = SeedQueue(db);
 
         var (ocrMock, blobMock, paramMock) = DefaultMocks();
-        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<CancellationToken>()))
+        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                .ReturnsAsync(OcrSuccess(esLegible: true, esConfianzaBaja: true, confianza: 55m));
         blobMock.Setup(b => b.SubirOcrAsync(It.IsAny<Stream>(), NombreArchivo, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(BlobOcrUrl);
@@ -283,7 +291,7 @@ public class OcrWorkerServiceTests
         var (grupoId, imagenId) = SeedQueue(db);
 
         var (ocrMock, blobMock, paramMock) = DefaultMocks();
-        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<CancellationToken>()))
+        ocrMock.Setup(o => o.ProcesarImagenAsync(BlobRawUrl, imagenId, It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                .ReturnsAsync(OcrSuccess(esLegible: false, esConfianzaBaja: true, confianza: 10m));
         blobMock.Setup(b => b.SubirIlegibleAsync(It.IsAny<Stream>(), NombreArchivo, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(BlobIlegibleUrl);
@@ -319,7 +327,7 @@ public class OcrWorkerServiceTests
         var (_, imagenId) = SeedQueue(db, intentos: 0);
 
         var (ocrMock, blobMock, paramMock) = DefaultMocks();
-        ocrMock.Setup(o => o.ProcesarImagenAsync(It.IsAny<string>(), imagenId, It.IsAny<CancellationToken>()))
+        ocrMock.Setup(o => o.ProcesarImagenAsync(It.IsAny<string>(), imagenId, It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                .ReturnsAsync(OcrFailure("Timeout"));
         paramMock.Setup(p => p.ObtenerIntAsync("OCR_MAX_INTENTOS", It.IsAny<int>(), It.IsAny<CancellationToken>()))
                  .ReturnsAsync(3);
@@ -348,7 +356,7 @@ public class OcrWorkerServiceTests
         var (_, imagenId) = SeedQueue(db, intentos: 2);
 
         var (ocrMock, blobMock, paramMock) = DefaultMocks();
-        ocrMock.Setup(o => o.ProcesarImagenAsync(It.IsAny<string>(), imagenId, It.IsAny<CancellationToken>()))
+        ocrMock.Setup(o => o.ProcesarImagenAsync(It.IsAny<string>(), imagenId, It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                .ReturnsAsync(OcrFailure("Service unavailable"));
         paramMock.Setup(p => p.ObtenerIntAsync("OCR_MAX_INTENTOS", It.IsAny<int>(), It.IsAny<CancellationToken>()))
                  .ReturnsAsync(3);
@@ -388,7 +396,7 @@ public class OcrWorkerServiceTests
         await workerB.InvokeProcesarAsync();
 
         ocrMock.Verify(
-            o => o.ProcesarImagenAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()),
+            o => o.ProcesarImagenAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<byte[]>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
             Times.Never,
             "el worker B no debe procesar la imagen si no pudo adquirir el lock optimista");
 

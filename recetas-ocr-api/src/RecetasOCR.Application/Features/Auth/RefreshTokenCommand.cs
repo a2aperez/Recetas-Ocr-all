@@ -39,7 +39,7 @@ public class RefreshTokenCommandHandler(
         var sesion = await db.Database
             .SqlQuery<SesionRow>($"""
                 SELECT s.Id, s.IdUsuario, s.JwtTokenId, s.Estado, s.FechaExpiracion,
-                       s.MotivoRevocacion, s.FechaModificacion,
+                       s.MotivoRevocacion, s.FechaUltimaActividad,
                        u.Username, u.NombreCompleto, u.Email,
                        r.Clave AS RolClave
                 FROM   seg.Sesiones s
@@ -63,7 +63,7 @@ public class RefreshTokenCommandHandler(
             if (sesion.MotivoRevocacion == "RENOVADA")
             {
                 // Grace period de 10 segundos para reintentos legítimos
-                var segundosDesdeRevocacion = (DateTime.UtcNow - sesion.FechaModificacion).TotalSeconds;
+                var segundosDesdeRevocacion = (DateTime.UtcNow - sesion.FechaUltimaActividad).TotalSeconds;
                 if (segundosDesdeRevocacion <= 10)
                 {
                     logger.LogWarning(
@@ -197,7 +197,7 @@ public class RefreshTokenCommandHandler(
             UPDATE seg.Sesiones
             SET    Estado = 'CERRADA', 
                    MotivoRevocacion = 'RENOVADA',
-                   FechaModificacion = GETUTCDATE()
+                   FechaUltimaActividad = GETUTCDATE()
             WHERE  Id = {sesion.Id}
             """, ct);
 
@@ -245,7 +245,7 @@ public class RefreshTokenCommandHandler(
         string    Estado,
         DateTime  FechaExpiracion,
         string?   MotivoRevocacion,
-        DateTime  FechaModificacion,
+        DateTime  FechaUltimaActividad,
         string    Username,
         string    NombreCompleto,
         string    Email,
