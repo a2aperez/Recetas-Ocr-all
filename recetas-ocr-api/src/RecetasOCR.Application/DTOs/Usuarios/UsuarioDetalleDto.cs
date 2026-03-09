@@ -10,7 +10,8 @@ public record UsuarioDetalleDto(
     string           NombreRol,
     bool             Activo,
     DateTime?        UltimoAcceso,
-    DateTime         FechaCreacion,
+    DateTime         FechaAlta,
     bool             RequiereCambioPassword,
-    List<PermisoDto> Permisos
+    List<PermisoDto> Permisos,
+    int              IdRol
 );

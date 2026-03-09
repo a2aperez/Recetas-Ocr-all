@@ -8,5 +8,5 @@ public record UsuarioListaDto(
     string    NombreRol,
     bool      Activo,
     DateTime? UltimoAcceso,
-    DateTime  FechaCreacion
+    DateTime  FechaAlta
 );

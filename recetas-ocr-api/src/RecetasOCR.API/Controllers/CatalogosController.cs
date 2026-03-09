@@ -10,7 +10,7 @@ namespace RecetasOCR.API.Controllers;
 
 [ApiController]
 [Route("api/catalogos")]
-//[Authorize]
+[Authorize]
 public class CatalogosController(IMediator mediator) : ControllerBase
 {
     [HttpGet("aseguradoras")]
@@ -47,5 +47,12 @@ public class CatalogosController(IMediator mediator) : ControllerBase
     {
         var result = await mediator.Send(new GetEstadosGrupoQuery(), ct);
         return Ok(ApiResponse<List<EstadoDto>>.Ok(result));
+    }
+
+    [HttpGet("roles")]
+    public async Task<ActionResult<ApiResponse<List<RolDto>>>> GetRoles(CancellationToken ct)
+    {
+        var result = await mediator.Send(new GetRolesQuery(), ct);
+        return Ok(ApiResponse<List<RolDto>>.Ok(result));
     }
 }

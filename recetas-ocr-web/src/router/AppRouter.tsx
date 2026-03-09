@@ -14,7 +14,10 @@ const ColaRevisionPage   = lazy(() => import('@/pages/revision/ColaRevisionPage'
 const RevisionImagenPage = lazy(() => import('@/pages/revision/RevisionImagenPage'));
 const FacturacionListPage = lazy(() => import('@/pages/facturacion/FacturacionListPage'));
 const GenerarCfdiPage    = lazy(() => import('@/pages/facturacion/GenerarCfdiPage'));
+const CatalogosPage      = lazy(() => import('@/pages/catalogos/CatalogosPage'));
 const UsuariosListPage   = lazy(() => import('@/pages/usuarios/UsuariosListPage'));
+const NuevoUsuarioPage   = lazy(() => import('@/pages/usuarios/NuevoUsuarioPage'));
+const UsuarioDetallePage = lazy(() => import('@/pages/usuarios/UsuarioDetallePage'));
 
 const Loading = () => (
   <div className="flex items-center justify-center h-screen">
@@ -33,6 +36,7 @@ const router = createBrowserRouter([
         children: [
           { index: true, element: <Navigate to="/dashboard" replace /> },
           { path: '/dashboard', element: <Suspense fallback={<Loading />}><DashboardPage /></Suspense> },
+          { path: '/catalogos', element: <Suspense fallback={<Loading />}><CatalogosPage /></Suspense> },
           { path: '/sin-permiso', element: <div className="p-8 text-center text-red-600 text-lg">Sin permisos para acceder a esta sección.</div> },
 
           {
@@ -83,6 +87,8 @@ const router = createBrowserRouter([
             element: <ProtectedRoute requiredPermission="USUARIOS.ADMINISTRAR" />,
             children: [
               { path: '/usuarios', element: <Suspense fallback={<Loading />}><UsuariosListPage /></Suspense> },
+              { path: '/usuarios/nuevo', element: <Suspense fallback={<Loading />}><NuevoUsuarioPage /></Suspense> },
+              { path: '/usuarios/:id', element: <Suspense fallback={<Loading />}><UsuarioDetallePage /></Suspense> },
             ],
           },
         ],

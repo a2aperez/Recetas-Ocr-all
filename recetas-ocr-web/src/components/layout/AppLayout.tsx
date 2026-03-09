@@ -12,6 +12,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { label: 'Dashboard',        icon: '🏠', to: '/dashboard' },
+  { label: 'Catálogos',        icon: '📚', to: '/catalogos' },
   { label: 'Grupos de Receta', icon: '📋', to: '/grupos-receta',  permiso: 'GRUPOS.VER' },
   { label: 'Subir Imágenes',   icon: '📷', to: '/imagenes/subir', permiso: 'IMAGENES.SUBIR' },
   { label: 'Cola de Revisión', icon: '🔍', to: '/revision',        permiso: 'REVISION.VER' },

@@ -83,98 +83,105 @@ public class SubirImagenCommandHandler(
             "[Imagenes] Blob subido a raw | Grupo: {IdGrupo} | Blob: {Blob}",
             command.IdGrupo, urlBlobRaw);
 
-        // ── Pasos 3-7 en transacción atómica ──────────────────────────
-        using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
-        try
+        // ── Pasos 3-7 en transacción atómica con execution strategy ────────
+        // El DbContext tiene SqlServerRetryingExecutionStrategy habilitado.
+        // Para usar transacciones manuales, debemos usar CreateExecutionStrategy().
+        var strategy = db.Database.CreateExecutionStrategy();
+
+        return await strategy.ExecuteAsync(async () =>
         {
-            // ── PASO 3a: IdEstadoImagen = cat.EstadosImagen WHERE Clave='RECIBIDA'
-            var estadoRecibida = await db.Database
-                .SqlQuery<EstadoRow>($"""
-                    SELECT Id, Clave FROM cat.EstadosImagen WHERE Clave = 'RECIBIDA'
-                    """)
-                .FirstOrDefaultAsync(cancellationToken)
-                ?? throw new EntidadNoEncontradaException("cat.EstadosImagen", "RECIBIDA");
+            using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                // ── PASO 3a: IdEstadoImagen = cat.EstadosImagen WHERE Clave='RECIBIDA'
+                var estadoRecibida = await db.Database
+                    .SqlQuery<EstadoRow>($"""
+                        SELECT Id, Clave FROM cat.EstadosImagen WHERE Clave = 'RECIBIDA'
+                        """)
+                    .FirstOrDefaultAsync(cancellationToken)
+                    ?? throw new EntidadNoEncontradaException("cat.EstadosImagen", "RECIBIDA");
 
-            // ── PASO 3b: NumeroHoja = COUNT(imagenes del grupo) + 1
-            var countRow = await db.Database
-                .SqlQuery<CountRow>($"""
-                    SELECT COUNT(*) AS Valor
-                    FROM   rec.Imagenes
-                    WHERE  IdGrupo = {command.IdGrupo}
-                    """)
-                .FirstAsync(cancellationToken);
+                // ── PASO 3b: NumeroHoja = COUNT(imagenes del grupo) + 1
+                var countRow = await db.Database
+                    .SqlQuery<CountRow>($"""
+                        SELECT COUNT(*) AS Valor
+                        FROM   rec.Imagenes
+                        WHERE  IdGrupo = {command.IdGrupo}
+                        """)
+                    .FirstAsync(cancellationToken);
 
-            var ahora       = DateTime.UtcNow;
-            var imagenId    = Guid.NewGuid();
-            var numeroHoja  = countRow.Valor + 1;
-            var extension   = Path.GetExtension(command.NombreArchivo)
-                                  ?.TrimStart('.').ToUpperInvariant();
-            var usuarioId   = currentUser.UserId!.Value;
-            var username    = currentUser.Username;
-            var origen      = command.OrigenImagen.ToUpperInvariant();
+                var ahora       = DateTime.UtcNow;
+                var imagenId    = Guid.NewGuid();
+                var numeroHoja  = countRow.Valor + 1;
+                var extension   = Path.GetExtension(command.NombreArchivo)
+                                      ?.TrimStart('.').ToUpperInvariant();
+                var usuarioId   = currentUser.UserId!.Value;
+                var username    = currentUser.Username;
+                var origen      = command.OrigenImagen.ToUpperInvariant();
 
-            // ── PASO 3c: INSERT rec.Imagenes ───────────────────────────
-            await db.Database.ExecuteSqlAsync($"""
-                INSERT INTO rec.Imagenes
-                    (Id, IdGrupo, NumeroHoja, UrlBlobRaw, NombreArchivo,
-                     TamanioBytes, FormatoImagen, OrigenImagen, IdUsuarioSubida,
-                     FechaSubida, FechaActualizacion, IdEstadoImagen,
-                     EsCapturaManual, IntentosProceso, ModificadoPor, FechaModificacion)
-                VALUES
-                    ({imagenId}, {command.IdGrupo}, {numeroHoja}, {urlBlobRaw},
-                     {command.NombreArchivo}, {command.TamanioBytes}, {extension},
-                     {origen}, {usuarioId}, {ahora}, {ahora}, {estadoRecibida.Id},
-                     0, 0, {username}, {ahora})
-                """, cancellationToken);
+                // ── PASO 3c: INSERT rec.Imagenes ───────────────────────────
+                await db.Database.ExecuteSqlAsync($"""
+                    INSERT INTO rec.Imagenes
+                        (Id, IdGrupo, NumeroHoja, UrlBlobRaw, NombreArchivo,
+                         TamanioBytes, FormatoImagen, OrigenImagen, IdUsuarioSubida,
+                         FechaSubida, FechaActualizacion, IdEstadoImagen,
+                         EsCapturaManual, IntentosProceso, ModificadoPor, FechaModificacion)
+                    VALUES
+                        ({imagenId}, {command.IdGrupo}, {numeroHoja}, {urlBlobRaw},
+                         {command.NombreArchivo}, {command.TamanioBytes}, {extension},
+                         {origen}, {usuarioId}, {ahora}, {ahora}, {estadoRecibida.Id},
+                         0, 0, {username}, {ahora})
+                    """, cancellationToken);
 
-            // ── PASO 4: INSERT ocr.ColaProcesamiento ───────────────────
-            // EstadoCola='PENDIENTE', Prioridad=5.
-            // El OcrWorkerService tomará este registro — NO llamar IOcrApiService aquí.
-            await db.Database.ExecuteSqlAsync($"""
-                INSERT INTO ocr.ColaProcesamiento
-                    (IdImagen, UrlBlobRaw, Prioridad, Intentos, MaxIntentos,
-                     FechaEncolado, Bloqueado, EstadoCola, ModificadoPor, FechaModificacion)
-                VALUES
-                    ({imagenId}, {urlBlobRaw}, 5, 0, 3,
-                     {ahora}, 0, 'PENDIENTE', {username}, {ahora})
-                """, cancellationToken);
+                // ── PASO 4: INSERT ocr.ColaProcesamiento ───────────────────
+                // EstadoCola='PENDIENTE', Prioridad=5.
+                // El OcrWorkerService tomará este registro — NO llamar IOcrApiService aquí.
+                await db.Database.ExecuteSqlAsync($"""
+                    INSERT INTO ocr.ColaProcesamiento
+                        (IdImagen, UrlBlobRaw, Prioridad, Intentos, MaxIntentos,
+                         FechaEncolado, Bloqueado, EstadoCola, ModificadoPor, FechaModificacion)
+                    VALUES
+                        ({imagenId}, {urlBlobRaw}, 5, 0, 3,
+                         {ahora}, 0, 'PENDIENTE', {username}, {ahora})
+                    """, cancellationToken);
 
-            // ── PASO 5: grupo.TotalImagenes++ ─────────────────────────
-            await db.Database.ExecuteSqlAsync($"""
-                UPDATE rec.GruposReceta
-                SET    TotalImagenes      = TotalImagenes + 1,
-                       FechaActualizacion = {ahora},
-                       ModificadoPor      = {username},
-                       FechaModificacion  = {ahora}
-                WHERE  Id = {command.IdGrupo}
-                """, cancellationToken);
+                // ── PASO 5: grupo.TotalImagenes++ ─────────────────────────
+                await db.Database.ExecuteSqlAsync($"""
+                    UPDATE rec.GruposReceta
+                    SET    TotalImagenes      = TotalImagenes + 1,
+                           FechaActualizacion = {ahora},
+                           ModificadoPor      = {username},
+                           FechaModificacion  = {ahora}
+                    WHERE  Id = {command.IdGrupo}
+                    """, cancellationToken);
 
-            // ── PASO 6: INSERT aud.LogProcesamiento Paso='COLA' ────────
-            var mensajeLog = $"Imagen encolada para OCR. Hoja: {numeroHoja}. BlobRaw: {urlBlobRaw}";
+                // ── PASO 6: INSERT aud.LogProcesamiento Paso='COLA' ────────
+                var mensajeLog = $"Imagen encolada para OCR. Hoja: {numeroHoja}. BlobRaw: {urlBlobRaw}";
 
-            await db.Database.ExecuteSqlAsync($"""
-                INSERT INTO aud.LogProcesamiento
-                    (IdImagen, IdGrupo, Paso, Nivel, Mensaje, Servidor, FechaEvento)
-                VALUES
-                    ({imagenId}, {command.IdGrupo}, 'COLA', 'INFO',
-                     {mensajeLog}, {Environment.MachineName}, {ahora})
-                """, cancellationToken);
+                await db.Database.ExecuteSqlAsync($"""
+                    INSERT INTO aud.LogProcesamiento
+                        (IdImagen, IdGrupo, Paso, Nivel, Mensaje, Servidor, FechaEvento)
+                    VALUES
+                        ({imagenId}, {command.IdGrupo}, 'COLA', 'INFO',
+                         {mensajeLog}, {Environment.MachineName}, {ahora})
+                    """, cancellationToken);
 
-            // ── PASO 7: SaveChangesAsync → commit → retornar Id ───────
-            await db.SaveChangesAsync(cancellationToken);
-            await tx.CommitAsync(cancellationToken);
+                // ── PASO 7: SaveChangesAsync → commit → retornar Id ───────
+                await db.SaveChangesAsync(cancellationToken);
+                await tx.CommitAsync(cancellationToken);
 
-            logger.LogInformation(
-                "[Imagenes] Imagen registrada | Id: {Id} | Grupo: {IdGrupo} | Hoja: {Hoja}",
-                imagenId, command.IdGrupo, numeroHoja);
+                logger.LogInformation(
+                    "[Imagenes] Imagen registrada | Id: {Id} | Grupo: {IdGrupo} | Hoja: {Hoja}",
+                    imagenId, command.IdGrupo, numeroHoja);
 
-            return imagenId;
-        }
-        catch
-        {
-            await tx.RollbackAsync(cancellationToken);
-            throw;
-        }
+                return imagenId;
+            }
+            catch
+            {
+                await tx.RollbackAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     // ── Tipos locales para resultados de SqlQuery ──────────────────────

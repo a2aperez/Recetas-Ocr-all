@@ -40,7 +40,7 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
 
         var rows = await db.Database
             .SqlQuery<MedicamentoRow>($"""
-                SELECT Id, NombreComercial, SustanciaActiva, Presentacion, CodigoEAN, Activo
+                SELECT Id, NombreComercial, SustanciaActiva, Presentacion, Concentracion
                 FROM   cat.Medicamentos
                 WHERE  Activo = 1
                   AND  ({busquedaLike} IS NULL
@@ -53,7 +53,7 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
 
         var items = rows
             .Select(r => new MedicamentoCatalogoDto(
-                r.Id, r.NombreComercial, r.SustanciaActiva, r.Presentacion, r.CodigoEAN, r.Activo))
+                r.Id, r.NombreComercial, r.SustanciaActiva, r.Presentacion, r.Concentracion))
             .ToList();
 
         return new PagedResultDto<MedicamentoCatalogoDto>(items, total, page, pageSize);
@@ -64,6 +64,5 @@ public class GetMedicamentosCatalogoQueryHandler(IRecetasOcrDbContext db)
         string  NombreComercial,
         string? SustanciaActiva,
         string? Presentacion,
-        string? CodigoEAN,
-        bool    Activo);
+        string? Concentracion);
 }

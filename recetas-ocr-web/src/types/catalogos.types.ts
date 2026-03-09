@@ -1,20 +1,23 @@
 export interface AseguradoraDto {
   id: number
+  clave: string
   nombre: string
+  razonSocial: string | null
   rfc: string | null
-  activa: boolean
+  activo: boolean
 }
 
 export interface ViaAdministracionDto {
   id: number
   clave: string
-  descripcion: string
+  nombre: string
 }
 
 export interface EstadoDto {
+  id: number
   clave: string
-  descripcion: string
-  esEstadoFinal: boolean
+  nombre: string
+  descripcion: string | null
 }
 
 export interface MedicamentoCatalogoDto {
@@ -22,6 +25,5 @@ export interface MedicamentoCatalogoDto {
   nombreComercial: string
   sustanciaActiva: string | null
   presentacion: string | null
-  laboratorio: string | null
-  codigoBarras: string | null
+  concentracion: string | null
 }

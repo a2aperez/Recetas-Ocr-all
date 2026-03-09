@@ -20,7 +20,7 @@ public class GetUsuarioByIdQueryHandler(IRecetasOcrDbContext db)
             .SqlQuery<UsuarioDetalleRow>($"""
                 SELECT u.Id, u.Username, u.Email, u.NombreCompleto,
                        r.Nombre AS NombreRol, u.Activo,
-                       u.UltimoAcceso, u.FechaAlta AS FechaCreacion,
+                       u.UltimoAcceso, u.FechaAlta,
                        u.RequiereCambioPassword, u.IdRol
                 FROM   seg.Usuarios u
                 INNER  JOIN seg.Roles r ON r.Id = u.IdRol
@@ -57,8 +57,8 @@ public class GetUsuarioByIdQueryHandler(IRecetasOcrDbContext db)
 
         return new UsuarioDetalleDto(
             row.Id, row.Username, row.Email, row.NombreCompleto,
-            row.NombreRol, row.Activo, row.UltimoAcceso, row.FechaCreacion,
-            row.RequiereCambioPassword, permisos);
+            row.NombreRol, row.Activo, row.UltimoAcceso, row.FechaAlta,
+            row.RequiereCambioPassword, permisos, row.IdRol);
     }
 
     // PermisosUsuario con Denegado=true sobreescribe al permiso de rol.
@@ -96,7 +96,7 @@ public class GetUsuarioByIdQueryHandler(IRecetasOcrDbContext db)
         string    NombreRol,
         bool      Activo,
         DateTime? UltimoAcceso,
-        DateTime  FechaCreacion,
+        DateTime  FechaAlta,
         bool      RequiereCambioPassword,
         int       IdRol);
 }

@@ -17,10 +17,11 @@ public class UsuariosController(IMediator mediator, ICurrentUserService currentU
     [HttpGet]
     [Authorize("USUARIOS.ADMINISTRAR")]
     public async Task<ActionResult<ApiResponse<PagedResultDto<UsuarioListaDto>>>> GetAll(
-        [FromQuery] int page = 1, [FromQuery] int pageSize = 20, [FromQuery] string? busqueda = null,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        [FromQuery] string? busqueda = null, [FromQuery] bool? activo = null,
         CancellationToken ct = default)
     {
-        var result = await mediator.Send(new GetUsuariosQuery(page, pageSize, busqueda), ct);
+        var result = await mediator.Send(new GetUsuariosQuery(page, pageSize, busqueda, activo), ct);
         return Ok(ApiResponse<PagedResultDto<UsuarioListaDto>>.Ok(result));
     }
 

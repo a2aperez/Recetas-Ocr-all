@@ -5,6 +5,5 @@ public record MedicamentoCatalogoDto(
     string  NombreComercial,
     string? SustanciaActiva,
     string? Presentacion,
-    string? CodigoEAN,
-    bool    Activo
+    string? Concentracion
 );

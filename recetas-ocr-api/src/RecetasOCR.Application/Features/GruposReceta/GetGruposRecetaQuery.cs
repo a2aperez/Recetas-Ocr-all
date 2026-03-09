@@ -46,9 +46,9 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
                   AND  ({fechaDesde}    IS NULL OR g.FechaCreacion >= {fechaDesde})
                   AND  ({fechaHasta}    IS NULL OR g.FechaCreacion <= {fechaHasta})
                   AND  ({busquedaLike}  IS NULL
-                        OR g.FolioBase      LIKE {busquedaLike}
-                        OR g.NombrePaciente LIKE {busquedaLike}
-                        OR g.NombreMedico   LIKE {busquedaLike})
+                        OR COALESCE(g.FolioBase, '')      LIKE {busquedaLike}
+                        OR COALESCE(g.NombrePaciente, '') LIKE {busquedaLike}
+                        OR COALESCE(g.NombreMedico, '')   LIKE {busquedaLike})
                 """)
             .FirstAsync(cancellationToken);
 
@@ -77,9 +77,9 @@ public class GetGruposRecetaQueryHandler(IRecetasOcrDbContext db)
                   AND  ({fechaDesde}    IS NULL OR g.FechaCreacion >= {fechaDesde})
                   AND  ({fechaHasta}    IS NULL OR g.FechaCreacion <= {fechaHasta})
                   AND  ({busquedaLike}  IS NULL
-                        OR g.FolioBase      LIKE {busquedaLike}
-                        OR g.NombrePaciente LIKE {busquedaLike}
-                        OR g.NombreMedico   LIKE {busquedaLike})
+                        OR COALESCE(g.FolioBase, '')      LIKE {busquedaLike}
+                        OR COALESCE(g.NombrePaciente, '') LIKE {busquedaLike}
+                        OR COALESCE(g.NombreMedico, '')   LIKE {busquedaLike})
                 ORDER BY g.FechaCreacion DESC
                 OFFSET {offset} ROWS FETCH NEXT {pageSize} ROWS ONLY
                 """)

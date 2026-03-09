@@ -6,6 +6,7 @@ import type {
   EstadoDto,
   MedicamentoCatalogoDto,
 } from '@/types/catalogos.types'
+import type { RolDto } from '@/types/usuario.types'
 import type { PagedResultDto } from './grupos-receta.api'
 
 export const catalogosApi = {
@@ -40,6 +41,11 @@ export const catalogosApi = {
 
   getEstadosGrupo: async (): Promise<EstadoDto[]> => {
     const { data } = await api.get<ApiResponse<EstadoDto[]>>('/catalogos/estados-grupo')
+    return data.data!
+  },
+
+  getRoles: async (): Promise<RolDto[]> => {
+    const { data } = await api.get<ApiResponse<RolDto[]>>('/catalogos/roles')
     return data.data!
   },
 }
