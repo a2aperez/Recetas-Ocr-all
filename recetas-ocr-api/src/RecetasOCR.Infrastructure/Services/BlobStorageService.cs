@@ -1,6 +1,7 @@
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 using RecetasOCR.Application.Common.Interfaces;
 using RecetasOCR.Domain.Common;
 using RecetasOCR.Domain.Exceptions;
@@ -20,14 +21,16 @@ namespace RecetasOCR.Infrastructure.Services;
 public class BlobStorageService : IBlobStorageService
 {
     private readonly BlobServiceClient _blobServiceClient;
+    private readonly ILogger<BlobStorageService> _logger;
 
-    public BlobStorageService(IConfiguration configuration)
+    public BlobStorageService(IConfiguration configuration, ILogger<BlobStorageService> logger)
     {
         var connectionString = configuration["AzureBlobStorage:ConnectionString"]
             ?? throw new InvalidOperationException(
                 "Falta configuración AzureBlobStorage:ConnectionString.");
 
         _blobServiceClient = new BlobServiceClient(connectionString);
+        _logger = logger;
     }
 
     // ─── Upload helpers ────────────────────────────────────────────────────────
@@ -59,14 +62,62 @@ public class BlobStorageService : IBlobStorageService
         const string operacion = "DescargarAsync";
         try
         {
-            var blobClient = new BlobClient(new Uri(urlBlob));
+            // Usar BlobUriBuilder para parsear correctamente la URL de Azure Blob
+            var blobUriBuilder = new BlobUriBuilder(new Uri(urlBlob));
+            var contenedor = blobUriBuilder.BlobContainerName;
+            var blobName = blobUriBuilder.BlobName;
+
+            if (string.IsNullOrWhiteSpace(contenedor) || string.IsNullOrWhiteSpace(blobName))
+            {
+                _logger.LogError(
+                    "[BlobStorage] URL de blob inválida: {Url} | Contenedor: {Container} | BlobName: {BlobName}",
+                    urlBlob, contenedor ?? "(null)", blobName ?? "(null)");
+
+                throw new InvalidOperationException(
+                    $"URL de blob inválida (no se pudo extraer contenedor o blob name): {urlBlob}");
+            }
+
+            _logger.LogDebug(
+                "[BlobStorage] Descargando blob | Contenedor: {Container} | BlobName: {BlobName} | URL: {Url}",
+                contenedor, blobName, urlBlob);
+
+            // Usar _blobServiceClient para heredar la autenticación
+            var containerClient = _blobServiceClient.GetBlobContainerClient(contenedor);
+            var blobClient = containerClient.GetBlobClient(blobName);
+
+            // Verificar si el blob existe antes de intentar descargarlo
+            var existe = await blobClient.ExistsAsync(ct);
+            if (!existe.Value)
+            {
+                _logger.LogWarning(
+                    "[BlobStorage] Blob no encontrado | Contenedor: {Container} | BlobName: {BlobName} | URL: {Url}",
+                    contenedor, blobName, urlBlob);
+
+                throw new BlobStorageException(
+                    operacion,
+                    contenedor,
+                    new InvalidOperationException(
+                        $"El blob '{blobName}' no existe en el contenedor '{contenedor}'. " +
+                        $"Verifique que el archivo se haya subido correctamente. URL: {urlBlob}"));
+            }
+
             var response = await blobClient.DownloadStreamingAsync(cancellationToken: ct);
+
+            _logger.LogDebug(
+                "[BlobStorage] Blob descargado exitosamente | Contenedor: {Container} | BlobName: {BlobName}",
+                contenedor, blobName);
+
             return response.Value.Content;
         }
         catch (Exception ex) when (ex is not BlobStorageException)
         {
             // Extraemos el nombre de contenedor de la URL para el mensaje de error.
             var contenedor = ExtraerContenedor(urlBlob);
+
+            _logger.LogError(ex,
+                "[BlobStorage] Error al descargar blob | Contenedor: {Container} | URL: {Url}",
+                contenedor, urlBlob);
+
             throw new BlobStorageException(operacion, contenedor, ex);
         }
     }

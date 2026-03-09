@@ -63,7 +63,7 @@ export const revisionApi = {
 
   rechazar: async (dto: {
     idImagen: string
-    motivo: string
+    motivoRechazo: string
   }): Promise<void> => {
     await api.post('/revision/rechazar', dto)
   },
@@ -74,7 +74,8 @@ export const revisionApi = {
     campo: string,
     valorAnterior: string | null,
     valorNuevo: string,
-    motivo: string
+    tipoCorreccion: string,
+    idMedicamento?: string
   ): Promise<void> => {
     await api.post<ApiResponse<EstadoOcrDto>>('/revision/corregir-campo', {
       idImagen,
@@ -82,7 +83,8 @@ export const revisionApi = {
       campo,
       valorAnterior,
       valorNuevo,
-      motivo,
+      tipoCorreccion,
+      idMedicamento: idMedicamento ?? null,
     })
   },
 }

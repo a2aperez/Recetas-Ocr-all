@@ -140,13 +140,22 @@ REGLAS:
 
             sw.Stop();
             _logger.LogInformation(
-                "OCR completado para {Id}: HTTP {Status} en {Ms}ms",
-                idImagen, (int)response.StatusCode, sw.ElapsedMilliseconds);
+                "OCR completado para {Id}: HTTP {Status} en {Ms}ms | Tamaño respuesta: {Size} bytes",
+                idImagen, (int)response.StatusCode, sw.ElapsedMilliseconds, body.Length);
 
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("OCR falló HTTP {Status}: {Body}", (int)response.StatusCode, body);
                 return OcrResultadoDto.Fallido($"Error HTTP {(int)response.StatusCode}");
+            }
+
+            // Logging de la respuesta completa en modo Debug para diagnóstico
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                var bodyPreview = body.Length > 500 ? body[..500] + "..." : body;
+                _logger.LogDebug(
+                    "[OCR] Respuesta API para imagen {Id}: {Body}",
+                    idImagen, bodyPreview);
             }
 
             return ParsearRespuestaOcr(body, idImagen, sw.ElapsedMilliseconds, umbral);
@@ -180,7 +189,28 @@ REGLAS:
                 jsonText = jsonText[..^3];
             jsonText = jsonText.Trim();
 
-            var doc = JsonSerializer.Deserialize<JsonElement>(jsonText);
+            var root = JsonSerializer.Deserialize<JsonElement>(jsonText);
+
+            // ═══════════════════════════════════════════════════════════════════
+            // La API devuelve una estructura con array "paginas"
+            // Los datos reales están en paginas[0]
+            // ═══════════════════════════════════════════════════════════════════
+
+            JsonElement doc;
+            if (root.TryGetProperty("paginas", out var paginas) && 
+                paginas.ValueKind == JsonValueKind.Array &&
+                paginas.GetArrayLength() > 0)
+            {
+                // Extraer la primera página del array
+                doc = paginas[0];
+                _logger.LogDebug("[OCR] Estructura con páginas detectada. Usando página 0.");
+            }
+            else
+            {
+                // Formato antiguo sin páginas (retrocompatibilidad)
+                doc = root;
+                _logger.LogDebug("[OCR] Estructura plana detectada (sin páginas).");
+            }
 
             var metadata = doc.TryGetProperty("metadata_lectura", out var meta)
                 ? meta : default;
@@ -191,7 +221,12 @@ REGLAS:
 
             var calidad = metadata.ValueKind != JsonValueKind.Undefined
                 && metadata.TryGetProperty("calidad_lectura", out var cal)
-                ? cal.GetString() ?? "baja" : "baja";
+                ? cal.GetString()?.Trim().ToLowerInvariant() ?? "baja"
+                : "baja";
+
+            _logger.LogInformation(
+                "[OCR] Imagen {Id} | Calidad recibida: '{Calidad}' | Porcentaje: {Porcentaje}% | Umbral: {Umbral}%",
+                idImagen, calidad, porcentaje, umbral);
 
             var camposIlegibles = new List<string>();
             if (metadata.ValueKind != JsonValueKind.Undefined
@@ -206,9 +241,28 @@ REGLAS:
                 }
             }
 
-            var esLegible       = !string.Equals(calidad, "baja", StringComparison.OrdinalIgnoreCase)
-                                  && porcentaje > 0;
+            // ═══════════════════════════════════════════════════════════════════
+            // REGLA DE LEGIBILIDAD: Basada ÚNICAMENTE en metadata_lectura del OCR
+            // NO se aplica lógica adicional ni se modifican los valores del OCR
+            // ═══════════════════════════════════════════════════════════════════
+
+            // CALIDAD → LEGIBILIDAD:
+            // - "alta" o "media" (o variantes como "media-alta", "media baja") → legible
+            // - "baja" pura → ilegible (requiere transcripción manual)
+            // Se usa Contains para tolerar variantes de redacción del LLM.
+            var esLegible = calidad.Contains("alta") || calidad.Contains("media");
+
+            // PORCENTAJE → CONFIANZA:
+            // - Si es legible y porcentaje < umbral → requiere revisión adicional
+            // - Si es legible y porcentaje >= umbral → aprobado para uso directo
             var esConfianzaBaja = esLegible && porcentaje < umbral;
+
+            _logger.LogInformation(
+                "[OCR] Decisión final basada en API OCR | Imagen {Id} | " +
+                "Calidad: '{Calidad}' | Porcentaje: {Porcentaje}% | " +
+                "EsLegible: {Legible} | EsConfianzaBaja: {ConfianzaBaja} | " +
+                "Campos ilegibles: {Count}",
+                idImagen, calidad, porcentaje, esLegible, esConfianzaBaja, camposIlegibles.Count);
 
             var paciente = doc.TryGetProperty("paciente", out var pac) ? pac : default;
             var medico   = doc.TryGetProperty("medico",   out var med) ? med : default;
@@ -221,7 +275,7 @@ REGLAS:
             {
                 foreach (var m in meds.EnumerateArray())
                 {
-                    medicamentos.Add(new MedicamentoOcrDto
+                    var medicamento = new MedicamentoOcrDto
                     {
                         Numero             = GetInt(m, "numero"),
                         NombreComercial    = GetStr(m, "nombre_comercial"),
@@ -239,15 +293,35 @@ REGLAS:
                         Indicaciones       = GetStr(m, "indicaciones"),
                         CodigoCIE10        = GetStr(m, "codigo_cie10"),
                         CodigoEAN          = GetStr(m, "codigo_ean")
-                    });
+                    };
+
+                    // Solo agregar medicamentos que tengan al menos nombre
+                    if (!string.IsNullOrWhiteSpace(medicamento.NombreComercial))
+                    {
+                        medicamentos.Add(medicamento);
+                    }
                 }
             }
+
+            _logger.LogInformation(
+                "[OCR] Medicamentos parseados: {Count}",
+                idImagen, medicamentos.Count);
 
             var notasOcr = metadata.ValueKind != JsonValueKind.Undefined
                 && metadata.TryGetProperty("notas", out var notas)
                 ? notas.GetString() : null;
 
-            return new OcrResultadoDto
+            // Construir notas adicionales si hay campos ilegibles
+            var notasCompletas = notasOcr;
+            if (camposIlegibles.Count > 0)
+            {
+                var camposTexto = string.Join(", ", camposIlegibles);
+                notasCompletas = string.IsNullOrWhiteSpace(notasOcr)
+                    ? $"Campos ilegibles: {camposTexto}"
+                    : $"{notasOcr}. Campos ilegibles: {camposTexto}";
+            }
+
+            var resultado = new OcrResultadoDto
             {
                 IdImagen           = idImagen,
                 Exitoso            = true,
@@ -256,7 +330,7 @@ REGLAS:
                 ConfianzaPromedio  = porcentaje,
                 CalidadLectura     = calidad,
                 CamposIlegibles    = camposIlegibles,
-                Notas              = notasOcr,
+                Notas              = notasCompletas,
                 DuracionMs         = durationMs,
 
                 AseguradoraDetectada = GetStr(doc, "aseguradora_detectada"),
@@ -283,10 +357,23 @@ REGLAS:
 
                 Medicamentos = medicamentos
             };
+
+            _logger.LogInformation(
+                "[OCR] Resultado final para imagen {Id} | Legible: {Legible} | Confianza: {Confianza}% | " +
+                "Medicamentos: {Meds} | Paciente: {Paciente} | Médico: {Medico}",
+                idImagen, 
+                resultado.EsLegible,
+                resultado.ConfianzaPromedio,
+                resultado.Medicamentos.Count,
+                !string.IsNullOrWhiteSpace(resultado.NombrePaciente) ? "Sí" : "No",
+                !string.IsNullOrWhiteSpace(resultado.NombreMedico) ? "Sí" : "No");
+
+            return resultado;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error parseando respuesta OCR para imagen {Id}", idImagen);
+            _logger.LogError(ex, "Error parseando respuesta OCR para imagen {Id}. JSON recibido: {Json}", 
+                idImagen, body.Length > 1000 ? body[..1000] + "..." : body);
             return OcrResultadoDto.Fallido($"Error parseando respuesta: {ex.Message}");
         }
     }

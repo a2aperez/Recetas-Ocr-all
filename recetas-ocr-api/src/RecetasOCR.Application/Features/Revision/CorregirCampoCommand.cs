@@ -85,14 +85,46 @@ public class CorregirCampoCommandHandler(
     ILogger<CorregirCampoCommandHandler> logger)
     : IRequestHandler<CorregirCampoCommand, Unit>
 {
+    // ── Allowlists — NEVER use user-supplied campo directly as column name ──────
+
+    /// <summary>Frontend camelCase campo → rec.GruposReceta column name (PascalCase).</summary>
+    private static readonly Dictionary<string, string> _gruposColumnas = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "nombrePaciente",    "NombrePaciente"          },
+        { "apellidoPaterno",   "ApellidoPaterno"         },
+        { "apellidoMaterno",   "ApellidoMaterno"         },
+        { "nombreMedico",      "NombreMedico"            },
+        { "cedulaMedico",      "CedulaMedico"            },
+        { "especialidad",      "EspecialidadTexto"       },
+        { "fechaConsulta",     "FechaConsulta"           },
+        { "diagnosticoTexto",  "DescripcionDiagnostico"  },
+        { "diagnostico",       "DescripcionDiagnostico"  },
+    };
+
+    /// <summary>Frontend camelCase campo → med.MedicamentosReceta column name (PascalCase).</summary>
+    private static readonly Dictionary<string, string> _medColumnas = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "nombreComercial",      "NombreComercial"      },
+        { "sustanciaActiva",      "SustanciaActiva"      },
+        { "presentacion",         "Presentacion"         },
+        { "dosis",                "Dosis"                },
+        { "cantidadTexto",        "CantidadTexto"        },
+        { "frecuenciaTexto",      "FrecuenciaTexto"      },
+        { "frecuenciaExpandida",  "FrecuenciaExpandida"  },
+        { "duracionTexto",        "DuracionTexto"        },
+        { "viaAdministracion",    "ViaAdministracion"    },
+        { "indicacionesCompletas","IndicacionesCompletas" },
+    };
+
     public async Task<Unit> Handle(
         CorregirCampoCommand command,
         CancellationToken    cancellationToken)
     {
         var ahora     = DateTime.UtcNow;
         var usuarioId = currentUser.UserId!.Value;
+        var usuario   = currentUser.Username ?? "sistema";
 
-        // Solo INSERT en aud.HistorialCorrecciones — no modifica nada más.
+        // ── 1. Auditoría ────────────────────────────────────────────────────────
         await db.Database.ExecuteSqlAsync($"""
             INSERT INTO aud.HistorialCorrecciones
                 (IdImagen, IdGrupo, IdMedicamento,
@@ -105,10 +137,62 @@ public class CorregirCampoCommandHandler(
                  {command.TipoCorreccion}, {usuarioId}, {ahora})
             """, cancellationToken);
 
+        // ── 2. Aplicar actualización de datos ───────────────────────────────────
+        switch (command.Tabla?.ToUpperInvariant())
+        {
+            case "GRUPOSRECETA":
+                if (_gruposColumnas.TryGetValue(command.Campo, out var colGrupo))
+                {
+                    // Para FechaConsulta usamos TRY_CAST para no romper con strings inválidos
+                    if (colGrupo == "FechaConsulta")
+                    {
+                        await db.Database.ExecuteSqlAsync($"""
+                            UPDATE rec.GruposReceta
+                            SET    FechaConsulta      = TRY_CAST({command.ValorNuevo} AS DATE),
+                                   FechaModificacion  = {ahora},
+                                   ModificadoPor      = {usuario}
+                            WHERE  Id = (SELECT TOP 1 IdGrupo FROM rec.Imagenes WHERE Id = {command.IdImagen})
+                            """, cancellationToken);
+                    }
+                    else
+                    {
+                        // Para otros campos, necesitamos usar ExecuteSqlRaw con FormattableString
+                        var sql = $@"
+                            UPDATE rec.GruposReceta
+                            SET    [{colGrupo}] = @p0,
+                                   FechaModificacion = @p1,
+                                   ModificadoPor = @p2
+                            WHERE  Id = (SELECT TOP 1 IdGrupo FROM rec.Imagenes WHERE Id = @p3)";
+
+                        await db.Database.ExecuteSqlRawAsync(sql,
+                            new object[] { command.ValorNuevo, ahora, usuario, command.IdImagen },
+                            cancellationToken);
+                    }
+                }
+                break;
+
+            case "MEDICAMENTOSRECETA":
+                if (_medColumnas.TryGetValue(command.Campo, out var colMed)
+                    && command.IdMedicamento.HasValue)
+                {
+                    var sql = $@"
+                        UPDATE med.MedicamentosReceta
+                        SET    [{colMed}] = @p0,
+                               FechaModificacion = @p1,
+                               ModificadoPor = @p2
+                        WHERE  Id = @p3";
+
+                    await db.Database.ExecuteSqlRawAsync(sql,
+                        new object[] { command.ValorNuevo, ahora, usuario, command.IdMedicamento.Value },
+                        cancellationToken);
+                }
+                break;
+        }
+
         await db.SaveChangesAsync(cancellationToken);
 
         logger.LogInformation(
-            "[Revision] Corrección registrada | Imagen: {IdImagen} | {Tabla}.{Campo} '{Ant}' → '{Nvo}'",
+            "[Revision] Corrección aplicada | Imagen: {IdImagen} | {Tabla}.{Campo} '{Ant}' → '{Nvo}'",
             command.IdImagen, command.Tabla, command.Campo,
             command.ValorAnterior, command.ValorNuevo);
 

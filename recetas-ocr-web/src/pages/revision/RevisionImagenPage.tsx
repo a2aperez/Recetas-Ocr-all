@@ -166,7 +166,7 @@ function ImageViewer({ imagen }: { imagen: ImagenDto }) {
 // ─── Editable field ───────────────────────────────────────────────────────────
 
 function EditableField({
-  label, value, idImagen, tabla, campo, tipoCorreccion = 'MANUAL',
+  label, value, idImagen, tabla, campo, tipoCorreccion = 'CapturaManual', idMedicamento,
 }: {
   label: string
   value: string | null | undefined
@@ -174,6 +174,7 @@ function EditableField({
   tabla: string
   campo: string
   tipoCorreccion?: string
+  idMedicamento?: string
 }) {
   const [current, setCurrent] = useState(value ?? '')
   const [saved, setSaved] = useState(false)
@@ -181,8 +182,10 @@ function EditableField({
   async function onBlur() {
     const prev = value ?? ''
     if (current === prev) return
+    // New medications (id prefixed 'new-') don't exist in DB yet — skip API call
+    if (idMedicamento?.startsWith('new-')) return
     try {
-      await revisionApi.corregirCampo(idImagen, tabla, campo, prev || null, current, tipoCorreccion)
+      await revisionApi.corregirCampo(idImagen, tabla, campo, prev || null, current, tipoCorreccion, idMedicamento)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
@@ -271,6 +274,7 @@ function MedicamentoRow({
               idImagen={idImagen}
               tabla={tabla}
               campo={f.campo}
+              idMedicamento={med.id}
             />
           ))}
         </div>
@@ -468,7 +472,7 @@ function RechazarDialog({
 }) {
   const [motivo, setMotivo] = useState('')
   const { mutate, isPending } = useMutation({
-    mutationFn: () => revisionApi.rechazar({ idImagen, motivo }),
+    mutationFn: () => revisionApi.rechazar({ idImagen, motivoRechazo: motivo }),
     onSuccess: () => {
       toast.success('Imagen rechazada')
       onDone()
