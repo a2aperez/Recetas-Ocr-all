@@ -169,23 +169,28 @@ function EditableField({
   label, value, idImagen, tabla, campo, tipoCorreccion = 'CapturaManual', idMedicamento,
 }: {
   label: string
-  value: string | null | undefined
+  value: string | number | null | undefined
   idImagen: string
   tabla: string
   campo: string
   tipoCorreccion?: string
   idMedicamento?: string
 }) {
-  const [current, setCurrent] = useState(value ?? '')
+  const strValue = value != null ? String(value) : ''
+  const [current, setCurrent] = useState(strValue)
   const [saved, setSaved] = useState(false)
 
+  // Sync when upstream value changes (e.g., after fresh fetch)
+  useEffect(() => {
+    setCurrent(value != null ? String(value) : '')
+  }, [value])
+
   async function onBlur() {
-    const prev = value ?? ''
-    if (current === prev) return
+    if (current === strValue) return
     // New medications (id prefixed 'new-') don't exist in DB yet — skip API call
     if (idMedicamento?.startsWith('new-')) return
     try {
-      await revisionApi.corregirCampo(idImagen, tabla, campo, prev || null, current, tipoCorreccion, idMedicamento)
+      await revisionApi.corregirCampo(idImagen, tabla, campo, strValue || null, current, tipoCorreccion, idMedicamento)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (err) {
@@ -230,7 +235,9 @@ function MedicamentoRow({
     { label: 'Sustancia activa', campo: 'sustanciaActiva' },
     { label: 'Presentación', campo: 'presentacion' },
     { label: 'Dosis', campo: 'dosis' },
-    { label: 'Cantidad', campo: 'cantidadTexto' },
+    { label: 'Cantidad (texto)', campo: 'cantidadTexto' },
+    { label: 'Cantidad (número)', campo: 'cantidadNumero' },
+    { label: 'Unidad cantidad', campo: 'unidadCantidad' },
     { label: 'Frecuencia', campo: 'frecuenciaTexto' },
     { label: 'Duración', campo: 'duracionTexto' },
     { label: 'Vía administración', campo: 'viaAdministracion' },
@@ -270,7 +277,7 @@ function MedicamentoRow({
             <EditableField
               key={f.campo}
               label={f.label}
-              value={med[f.campo] as string | null}
+              value={med[f.campo] as string | number | null}
               idImagen={idImagen}
               tabla={tabla}
               campo={f.campo}
@@ -341,8 +348,13 @@ function DatosPanel({
   imagen: ImagenDto
   grupo: GrupoRecetaDetalleDto
 }) {
-  const [meds, setMeds] = useState<MedicamentoRecetaDto[]>(() => grupo.medicamentos)
+  const [meds, setMeds] = useState<MedicamentoRecetaDto[]>(grupo.medicamentos)
   const tabla = 'GruposReceta'
+
+  // Sync meds when grupo data changes (e.g., after fresh fetch)
+  useEffect(() => {
+    setMeds(grupo.medicamentos)
+  }, [grupo.medicamentos])
 
   function addMedicamento() {
     const nuevo: MedicamentoRecetaDto = {

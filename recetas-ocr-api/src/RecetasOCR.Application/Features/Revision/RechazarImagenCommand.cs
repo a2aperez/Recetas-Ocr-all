@@ -64,7 +64,7 @@ public class RechazarImagenCommandHandler(
 {
     private static readonly string[] _estadosPendientesRevision =
         EstadosValidos.ImagenesPendientesRevision()
-            .Select(e => e.ToString().ToUpperInvariant())
+            .Select(EstadosValidos.ToDbClave)
             .ToArray();
 
     public async Task<Unit> Handle(

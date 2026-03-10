@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using RecetasOCR.Domain.Enums;
 
 namespace RecetasOCR.Domain.Common;
@@ -58,4 +59,11 @@ public static class EstadosValidos
         EstadoGrupo.RequiereCapturaManual,
         EstadoGrupo.GrupoIncompleto
     ];
+
+    /// <summary>
+    /// Convierte un EstadoImagen a su clave exacta en cat.EstadosImagen (SCREAMING_SNAKE_CASE).
+    /// Ej: OcrAprobado → OCR_APROBADO, ExtraccionCompleta → EXTRACCION_COMPLETA.
+    /// </summary>
+    public static string ToDbClave(EstadoImagen estado) =>
+        Regex.Replace(estado.ToString(), @"(?<=[a-z])([A-Z])", "_$1").ToUpperInvariant();
 }

@@ -262,7 +262,10 @@ export default function SubirImagenPage() {
         setProgreso(100)
         setArchivoEstado(archivo.uid, 'completado', 100, resultado)
 
-        // Invalidate caches
+        // Pre-populate imagen cache so revision page has immediate data
+        qc.setQueryData(['imagenes', resultado.id], resultado)
+
+        // Invalidate caches to force fresh fetch of related data
         qc.invalidateQueries({ queryKey: ['imagenes', 'by-grupo', idGrupo] })
         qc.invalidateQueries({ queryKey: ['grupos-receta', 'detail', idGrupo] })
 

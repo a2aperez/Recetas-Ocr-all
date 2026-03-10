@@ -58,13 +58,13 @@ public class AprobarImagenCommandHandler(
     // Claves de cat.EstadosImagen que representan estados finales
     private static readonly string[] _estadosFinalesImagen =
         EstadosValidos.ImagenesFinales()
-            .Select(e => e.ToString().ToUpperInvariant())
+            .Select(EstadosValidos.ToDbClave)
             .ToArray();
 
     // Claves de cat.EstadosImagen válidos para iniciar revisión
     private static readonly string[] _estadosPendientesRevision =
         EstadosValidos.ImagenesPendientesRevision()
-            .Select(e => e.ToString().ToUpperInvariant())
+            .Select(EstadosValidos.ToDbClave)
             .ToArray();
 
     public async Task<Unit> Handle(
